@@ -24,6 +24,7 @@ import pandas as pd
 import yfinance as yf
 from scipy.optimize import minimize
 from datetime import datetime, timedelta
+from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -177,7 +178,8 @@ def download_prices(tickers, start, end, auto_adjust=False):
     failed = []
     seen = set()
     tickers = [t for t in tickers if not (t in seen or seen.add(t))]
-    for i in range(0, len(tickers), chunk):
+    print(f"Descargando {len(tickers)} tickers en bloques...")
+    for i in tqdm(range(0, len(tickers), chunk), desc="Descargando"):
         block = tickers[i:i+chunk]
         try:
             df = yf.download(block, start=start, end=end, progress=False, threads=True,
@@ -307,6 +309,32 @@ def prompt_initial_capital(default=100000.0):
     # fallback en consola
     try:
         txt = input(f"Introduce el monto inicial [{default}]: ")
+        return float(txt) if txt else default
+    except Exception:
+        return default
+
+def prompt_risk_free_rate(default=0.105):
+    """Solicita la Tasa Libre de Riesgo (anual). Default 10.5% (México)."""
+    if TK_AVAILABLE:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes('-topmost', True)
+        except Exception:
+            pass
+        # Pedimos el valor como porcentaje (ej: 10.5) para que sea más amigable
+        value = simpledialog.askfloat(
+            "Tasa Libre de Riesgo",
+            f"Tasa anual (%): (Ej: 10.5 para México)",
+            initialvalue=default*100,
+            parent=root,
+        )
+        root.destroy()
+        return (value / 100.0) if value is not None else default
+    
+    # Fallback consola
+    try:
+        txt = input(f"Introduce Tasa Libre de Riesgo anual (decimal) [{default}]: ")
         return float(txt) if txt else default
     except Exception:
         return default
@@ -1734,7 +1762,7 @@ def simulate_via_factors_with_bench_log(B, resid_df, factors, days=TRADING_DAYS,
     resid_cov = resid_df.cov().values
     sims_assets = np.zeros((n_sims, days, N))
     sims_factor = np.zeros((n_sims, days))
-    for s in range(n_sims):
+    for s in tqdm(range(n_sims), desc="Simulando Factores"):
         factor_path = np.random.multivariate_normal(fac_mean, fac_cov, size=days)
         asset_path = factor_path @ B.values
         noise = np.random.multivariate_normal(np.zeros(N), resid_cov, size=days)
@@ -1774,7 +1802,7 @@ def summarise_assets_from_sims_log(sims_assets_log, sims_bench_log, asset_names=
     exp_returns = np.mean(cum_assets, axis=0)
     vols = np.std(cum_assets, axis=0, ddof=1)
     betas = np.zeros(N)
-    for j in range(N):
+    for j in tqdm(range(N), desc="Calculando Betas Simuladas"):
         betas_j = []
         for s in range(n_sims):
             asset_daily = sims_assets_log[s,:,j]
@@ -1793,8 +1821,9 @@ def summarise_assets_from_sims_log(sims_assets_log, sims_bench_log, asset_names=
 # ---------- ROBUST OPT OVER SIMS ----------
 def optimize_over_simulations_local(sims_log, method='avg_sharpe', bounds=None, constraints=None, risk_free=RISK_FREE_ANNUAL):
     n_sims, days, n_assets = sims_log.shape
-    mean_annual_sims = np.array([np.expm1(sims_log[i]).mean(axis=0) * TRADING_DAYS for i in range(n_sims)])
-    cov_annual_sims = np.array([np.cov(np.expm1(sims_log[i]).T) * TRADING_DAYS for i in range(n_sims)])
+    print("Calculando estadísticas sobre simulaciones...")
+    mean_annual_sims = np.array([np.expm1(sims_log[i]).mean(axis=0) * TRADING_DAYS for i in tqdm(range(n_sims), desc="Means")])
+    cov_annual_sims = np.array([np.cov(np.expm1(sims_log[i]).T) * TRADING_DAYS for i in tqdm(range(n_sims), desc="Covs")])
     def objective_avg_sharpe(w):
         total = 0.0
         for i in range(n_sims):
@@ -2350,15 +2379,11 @@ def rebalance_alerts_for_scenarios(scenarios, prices, initial_capital=100000,
 # ---------- HTML VIEWER (sin error de format con llaves) ----------
 def generate_html_viewer(image_index, out_html_path, out_dir=OUT_DIR, run_id=None):
     """
-    Genera un visor HTML robusto con categorías laterales y visor modal.
+    Genera un visor HTML profesional (Modo Oscuro, Búsqueda, Animaciones, Modal con navegación).
     """
-    # Preparar lista plana de items
+    # 1. Preparar lista de items
     page_items = []
-    cat_counts = {}
     
-    # Conjunto para evitar duplicados por nombre de archivo
-    seen_files = set()
-
     # Procesar el índice de imágenes
     for cat, items in (image_index or {}).items():
         for title, path in items:
@@ -2366,24 +2391,17 @@ def generate_html_viewer(image_index, out_html_path, out_dir=OUT_DIR, run_id=Non
                 continue
             
             filename = os.path.basename(path)
-            
-            # Evitar duplicados visuales si el mismo archivo está en varias categorías? 
-            # El usuario pide categorizar, así que permitimos el mismo archivo en distintas categorías
-            # si fuera necesario, pero idealmente copiamos una sola vez.
-            
-            # Copiar a carpeta de salida si es necesario
             dest = os.path.join(out_dir, filename)
+            
+            # Copiar archivo si no está en la carpeta de salida
             try:
                 if os.path.abspath(path) != os.path.abspath(dest):
                     shutil.copy2(path, dest)
             except Exception:
-                pass # Si falla copia, intentamos usar ruta original relativa
+                pass 
             
-            # Determinar ruta relativa para el HTML
-            if os.path.exists(dest):
-                rel_path = filename
-            else:
-                rel_path = os.path.relpath(path, start=out_dir)
+            # Determinar ruta relativa
+            rel_path = filename if os.path.exists(dest) else os.path.relpath(path, start=out_dir)
 
             is_html = filename.lower().endswith('.html')
             is_csv = filename.lower().endswith('.csv')
@@ -2396,188 +2414,684 @@ def generate_html_viewer(image_index, out_html_path, out_dir=OUT_DIR, run_id=Non
                 "type": "html" if is_html else ("csv" if is_csv else "img")
             }
             page_items.append(item)
-            cat_counts[cat] = cat_counts.get(cat, 0) + 1
 
     run_id = run_id or datetime.now().strftime('%Y-%m-%d %H:%M')
 
-    # Plantilla HTML autocontenida
+    # 2. Plantilla HTML Moderna
     html_template = """<!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Visor de Portafolios</title>
+    <title>Portfolio Analytics</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        :root { --primary: #2563eb; --bg: #f8fafc; --sidebar: #ffffff; --text: #1e293b; --border: #e2e8f0; }
-        body { font-family: -apple-system, system-ui, sans-serif; margin: 0; background: var(--bg); color: var(--text); display: flex; height: 100vh; overflow: hidden; }
-        
-        /* Sidebar */
-        aside { width: 260px; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 1rem; overflow-y: auto; flex-shrink: 0; }
-        h1 { font-size: 1.2rem; margin: 0 0 1.5rem 0; color: var(--primary); font-weight: 700; }
-        .nav-btn { display: block; width: 100%; text-align: left; padding: 0.75rem 1rem; margin-bottom: 0.25rem; border: none; background: transparent; color: var(--text); cursor: pointer; border-radius: 0.5rem; font-size: 0.95rem; transition: all 0.2s; }
-        .nav-btn:hover { background: #f1f5f9; }
-        .nav-btn.active { background: var(--primary); color: white; font-weight: 500; }
-        .badge { float: right; opacity: 0.7; font-size: 0.8em; }
-        
-        /* Main Content */
-        main { flex: 1; padding: 2rem; overflow-y: auto; }
-        .header-info { margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1rem; display: flex; justify-content: space-between; align-items: center; }
-        .run-id { font-size: 0.85rem; color: #64748b; }
-        
-        /* Grid */
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem; }
-        .card { background: white; border: 1px solid var(--border); border-radius: 0.75rem; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05); transition: transform 0.2s; display: flex; flex-direction: column; }
-        .card:hover { transform: translateY(-2px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .card-img-box { height: 200px; overflow: hidden; background: #f1f5f9; display: flex; align-items: center; justify-content: center; border-bottom: 1px solid var(--border); cursor: pointer; position: relative; }
-        .card-img-box img { max-width: 100%; max-height: 100%; object-fit: contain; }
-        .card-body { padding: 1rem; flex: 1; display: flex; flex-direction: column; justify-content: space-between; }
-        .card-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.5rem; }
-        .card-actions { margin-top: 0.5rem; display: flex; gap: 0.5rem; }
-        .btn-sm { font-size: 0.8rem; text-decoration: none; padding: 0.3rem 0.6rem; border: 1px solid var(--border); border-radius: 0.25rem; color: var(--text); background: #f8fafc; }
-        .btn-sm:hover { background: #e2e8f0; }
+        :root {
+            /* Light Theme */
+            --bg-body: #f3f4f6;
+            --bg-sidebar: #ffffff;
+            --bg-card: #ffffff;
+            --text-main: #1f2937;
+            --text-muted: #6b7280;
+            --primary: #4f46e5; /* Indigo */
+            --primary-hover: #4338ca;
+            --border: #e5e7eb;
+            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            --shadow-hover: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
 
-        /* Types */
-        .iframe-container { width: 100%; height: 100%; }
-        iframe { width: 100%; height: 100%; border: none; pointer-events: none; } /* pointer-events none in grid to allow click */
+        [data-theme="dark"] {
+            /* Dark Theme */
+            --bg-body: #0f172a;
+            --bg-sidebar: #1e293b;
+            --bg-card: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --primary: #6366f1;
+            --primary-hover: #818cf8;
+            --border: #334155;
+            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+            --shadow-hover: 0 10px 15px -3px rgba(0, 0, 0, 0.4);
+        }
+
+        * { box-sizing: border-box; transition: background-color 0.2s, border-color 0.2s, color 0.1s; }
         
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            background-color: var(--bg-body);
+            color: var(--text-main);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* --- Sidebar --- */
+        aside {
+            width: 280px;
+            background-color: var(--bg-sidebar);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            z-index: 20;
+        }
+
+        .brand {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .brand h1 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--text-main);
+            margin: 0;
+            letter-spacing: -0.025em;
+        }
+        .brand-icon {
+            width: 32px; height: 32px;
+            background: linear-gradient(135deg, var(--primary), #ec4899);
+            border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            color: white; font-weight: bold; font-size: 18px;
+        }
+
+        .nav-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+        }
+        
+        .nav-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+            margin-top: 1.5rem;
+            font-weight: 600;
+            padding-left: 0.75rem;
+        }
+
+        .nav-btn {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.25rem;
+            border: 1px solid transparent;
+            background: transparent;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-radius: 0.5rem;
+            font-size: 0.95rem;
+            font-weight: 500;
+            text-align: left;
+            transition: all 0.2s ease;
+        }
+        
+        .nav-btn:hover {
+            background-color: var(--bg-body);
+            color: var(--text-main);
+        }
+        
+        .nav-btn.active {
+            background-color: var(--primary);
+            color: #ffffff;
+            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3);
+        }
+        .nav-btn.active .badge {
+            background-color: rgba(255,255,255,0.2);
+            color: white;
+        }
+
+        .badge {
+            font-size: 0.75rem;
+            background-color: var(--bg-body);
+            padding: 2px 8px;
+            border-radius: 12px;
+            color: var(--text-muted);
+            transition: all 0.2s;
+        }
+
+        .sidebar-footer {
+            padding: 1rem;
+            border-top: 1px solid var(--border);
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-align: center;
+        }
+
+        /* --- Main Content --- */
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+
+        header {
+            background-color: var(--bg-sidebar);
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header-left h2 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+        .run-info {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .header-controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        /* Search Input */
+        .search-wrapper {
+            position: relative;
+        }
+        .search-input {
+            background: var(--bg-body);
+            border: 1px solid var(--border);
+            padding: 0.5rem 1rem 0.5rem 2.2rem;
+            border-radius: 8px;
+            color: var(--text-main);
+            width: 240px;
+            font-size: 0.9rem;
+            outline: none;
+        }
+        .search-input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.1);
+        }
+        .search-icon {
+            position: absolute;
+            left: 0.75rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        /* Theme Toggle */
+        .theme-toggle {
+            background: none;
+            border: 1px solid var(--border);
+            padding: 0.5rem;
+            border-radius: 8px;
+            cursor: pointer;
+            color: var(--text-main);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .theme-toggle:hover {
+            background: var(--bg-body);
+        }
+
+        /* Content Area */
+        .content-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 2rem;
+            background-color: var(--bg-body);
+        }
+
+        /* Grid System */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 1.5rem;
+            padding-bottom: 3rem;
+        }
+
+        /* Card Design */
+        .card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            animation: fadeIn 0.4s ease-out backwards;
+        }
+        
+        .card:hover {
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-hover);
+            border-color: var(--primary);
+        }
+
+        .card-preview {
+            height: 220px;
+            background-color: var(--bg-body);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .card-preview img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            transition: transform 0.3s;
+        }
+        .card:hover .card-preview img {
+            transform: scale(1.03);
+        }
+
+        .card-icon { font-size: 3rem; opacity: 0.5; }
+
+        .card-body {
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+        }
+        
+        .card-title {
+            font-weight: 600;
+            font-size: 1rem;
+            margin-bottom: 0.5rem;
+            color: var(--text-main);
+            line-height: 1.4;
+        }
+        
+        .card-meta {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+            flex: 1;
+        }
+
+        .card-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: auto;
+        }
+        
+        .btn {
+            flex: 1;
+            text-align: center;
+            padding: 0.5rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            text-decoration: none;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        
+        .btn-primary {
+            background-color: var(--primary);
+            color: white;
+            border: 1px solid var(--primary);
+        }
+        .btn-primary:hover {
+            background-color: var(--primary-hover);
+        }
+        
+        .btn-outline {
+            background-color: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-main);
+        }
+        .btn-outline:hover {
+            border-color: var(--text-muted);
+            background-color: var(--bg-body);
+        }
+
+        /* Iframe */
+        .iframe-wrap { width: 100%; height: 100%; }
+        iframe { width: 100%; height: 100%; border: none; }
+
         /* Modal */
-        .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; padding: 2rem; }
-        .modal.active { display: flex; }
-        .modal-content { max-width: 95vw; max-height: 95vh; object-fit: contain; border-radius: 4px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); }
-        .close-modal { position: absolute; top: 1rem; right: 1rem; color: white; font-size: 2rem; cursor: pointer; background: none; border: none; }
+        .modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(4px);
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .modal.show {
+            display: flex;
+            opacity: 1;
+        }
         
-        /* Empty State */
-        .empty { text-align: center; color: #64748b; margin-top: 3rem; grid-column: 1 / -1; }
+        .modal-content {
+            max-width: 90vw;
+            max-height: 90vh;
+            border-radius: 8px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-btn {
+            position: absolute;
+            background: rgba(255,255,255,0.1);
+            border: none;
+            color: white;
+            padding: 1rem;
+            cursor: pointer;
+            border-radius: 50%;
+            font-size: 1.5rem;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.2s;
+        }
+        .modal-btn:hover { background: rgba(255,255,255,0.2); }
+        .modal-close { top: 1.5rem; right: 1.5rem; }
+        .modal-prev { left: 1.5rem; }
+        .modal-next { right: 1.5rem; }
+
+        .empty-state {
+            grid-column: 1 / -1;
+            text-align: center;
+            padding: 4rem;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* Mobile responsive */
+        @media (max-width: 768px) {
+            body { flex-direction: column; overflow: auto; }
+            aside { width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+            .nav-scroll { display: none; } /* Simplified for mobile */
+            main { height: auto; }
+        }
     </style>
 </head>
 <body>
 
 <aside>
-    <h1>📊 Portfolio Maker</h1>
-    <div id="nav-container">
+    <div class="brand">
+        <div class="brand-icon">P</div>
+        <h1>Portfolio Maker</h1>
+    </div>
+    
+    <div class="nav-scroll" id="nav-container">
         </div>
+
+    <div class="sidebar-footer">
+        Run ID: __RUN_ID__
+    </div>
 </aside>
 
 <main>
-    <div class="header-info">
-        <h2 id="current-cat-title">Todas</h2>
-        <span class="run-id">Generado: __RUN_ID__</span>
-    </div>
-    <div id="grid" class="grid">
+    <header>
+        <div class="header-left">
+            <h2 id="page-title">Dashboard</h2>
+            <div class="run-info" id="item-count">Cargando...</div>
         </div>
+        
+        <div class="header-controls">
+            <div class="search-wrapper">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="search-input" class="search-input" placeholder="Buscar gráfico...">
+            </div>
+            
+            <button class="theme-toggle" id="theme-btn" title="Cambiar tema">
+                🌓
+            </button>
+        </div>
+    </header>
+
+    <div class="content-scroll">
+        <div class="grid" id="grid">
+            </div>
+    </div>
 </main>
 
 <div class="modal" id="modal">
-    <button class="close-modal" onclick="closeModal()">&times;</button>
-    <img id="modal-img" class="modal-content" src="" alt="">
+    <button class="modal-btn modal-close" onclick="closeModal()">✕</button>
+    <button class="modal-btn modal-prev" onclick="navModal(-1)">❮</button>
+    <button class="modal-btn modal-next" onclick="navModal(1)">❯</button>
+    <img id="modal-img" class="modal-content" src="" alt="Vista previa">
 </div>
 
 <script>
-    // Data injected from Python
+    // --- Data ---
     const ITEMS = __ITEMS_JSON__;
     
-    // State
-    let currentCat = 'Todas';
+    // --- State ---
+    let state = {
+        category: 'Todas',
+        search: '',
+        currentImageIndex: -1,
+        filteredItems: []
+    };
 
-    function init() {
-        renderNav();
-        renderGrid();
-    }
-
-    function renderNav() {
-        const nav = document.getElementById('nav-container');
-        const cats = {};
-        ITEMS.forEach(i => cats[i.category] = (cats[i.category] || 0) + 1);
-        
-        let html = `<button class="nav-btn ${currentCat === 'Todas' ? 'active' : ''}" onclick="setCat('Todas')">
-                        Todas <span class="badge">${ITEMS.length}</span>
-                    </button>`;
-                    
-        // Sort categories to put specific ones first if desired, or alphabetical
-        Object.keys(cats).sort().forEach(cat => {
-            html += `<button class="nav-btn ${currentCat === cat ? 'active' : ''}" onclick="setCat('${cat}')">
-                        ${cat} <span class="badge">${cats[cat]}</span>
-                     </button>`;
-        });
-        nav.innerHTML = html;
-    }
-
-    function setCat(cat) {
-        currentCat = cat;
-        document.getElementById('current-cat-title').textContent = cat;
-        renderNav();
-        renderGrid();
-    }
-
-    function renderGrid() {
-        const grid = document.getElementById('grid');
-        const filtered = currentCat === 'Todas' ? ITEMS : ITEMS.filter(i => i.category === currentCat);
-        
-        if (filtered.length === 0) {
-            grid.innerHTML = '<div class="empty">No hay elementos en esta categoría.</div>';
-            return;
-        }
-
-        grid.innerHTML = filtered.map(item => {
-            let content = '';
-            if (item.type === 'img') {
-                content = `<div class="card-img-box" onclick="openModal('${item.path}')">
-                             <img src="${item.path}" alt="${item.title}" loading="lazy">
-                           </div>`;
-            } else if (item.type === 'html') {
-                content = `<div class="card-img-box">
-                             <div class="iframe-container"><iframe src="${item.path}"></iframe></div>
-                           </div>`;
-            } else {
-                content = `<div class="card-img-box" style="font-size:3rem">📄</div>`;
-            }
-
-            return `
-                <div class="card">
-                    ${content}
-                    <div class="card-body">
-                        <div class="card-title">${item.title}</div>
-                        <div class="card-actions">
-                            <a href="${item.path}" target="_blank" class="btn-sm">Abrir</a>
-                            <a href="${item.path}" download class="btn-sm">Descargar</a>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }).join('');
-    }
-
-    // Modal logic
+    // --- DOM Elements ---
+    const grid = document.getElementById('grid');
+    const navContainer = document.getElementById('nav-container');
+    const pageTitle = document.getElementById('page-title');
+    const itemCount = document.getElementById('item-count');
+    const searchInput = document.getElementById('search-input');
     const modal = document.getElementById('modal');
     const modalImg = document.getElementById('modal-img');
 
-    window.openModal = function(src) {
-        modalImg.src = src;
-        modal.classList.add('active');
+    // --- Initialization ---
+    function init() {
+        // Theme init
+        const savedTheme = localStorage.getItem('theme') || 'light';
+        document.documentElement.setAttribute('data-theme', savedTheme);
+        
+        // Render Nav
+        renderNav();
+        
+        // Initial Filter & Render
+        filterAndRender();
+
+        // Event Listeners
+        searchInput.addEventListener('input', (e) => {
+            state.search = e.target.value.toLowerCase();
+            filterAndRender();
+        });
+
+        document.getElementById('theme-btn').addEventListener('click', toggleTheme);
+        
+        // Keyboard Nav
+        document.addEventListener('keydown', (e) => {
+            if (modal.classList.contains('show')) {
+                if (e.key === 'Escape') closeModal();
+                if (e.key === 'ArrowLeft') navModal(-1);
+                if (e.key === 'ArrowRight') navModal(1);
+            }
+        });
+    }
+
+    // --- Core Logic ---
+    function renderNav() {
+        // Count categories
+        const counts = {};
+        ITEMS.forEach(i => counts[i.category] = (counts[i.category] || 0) + 1);
+        
+        // Always add 'Todas'
+        let navHTML = `
+            <div class="nav-label">General</div>
+            <button class="nav-btn ${state.category === 'Todas' ? 'active' : ''}" onclick="setCategory('Todas')">
+                <span>📑 Todas</span>
+                <span class="badge">${ITEMS.length}</span>
+            </button>
+        `;
+
+        // Sort keys
+        const cats = Object.keys(counts).sort();
+        
+        // Separate logic can be added here to group specific categories if needed
+        // For now, simple list
+        if(cats.length > 0) navHTML += `<div class="nav-label">Categorías</div>`;
+        
+        cats.forEach(cat => {
+            let icon = '📊';
+            if(cat.includes('Riesgo')) icon = '⚠️';
+            if(cat.includes('Rebalanceo')) icon = '⚖️';
+            if(cat.includes('Comparativa')) icon = '📈';
+            
+            navHTML += `
+                <button class="nav-btn ${state.category === cat ? 'active' : ''}" onclick="setCategory('${cat}')">
+                    <span>${icon} ${cat}</span>
+                    <span class="badge">${counts[cat]}</span>
+                </button>
+            `;
+        });
+
+        navContainer.innerHTML = navHTML;
+    }
+
+    window.setCategory = function(cat) {
+        state.category = cat;
+        renderNav(); // Re-render to update active class
+        filterAndRender();
+        // Reset scroll
+        document.querySelector('.content-scroll').scrollTop = 0;
+    }
+
+    function filterAndRender() {
+        // Filter logic
+        state.filteredItems = ITEMS.filter(item => {
+            const matchCat = state.category === 'Todas' || item.category === state.category;
+            const matchSearch = item.title.toLowerCase().includes(state.search) || 
+                                item.filename.toLowerCase().includes(state.search);
+            return matchCat && matchSearch;
+        });
+
+        // Update Header
+        pageTitle.innerText = state.category;
+        itemCount.innerText = `${state.filteredItems.length} elementos encontrados`;
+
+        // Clear Grid
+        grid.innerHTML = '';
+
+        if (state.filteredItems.length === 0) {
+            grid.innerHTML = '<div class="empty-state">No se encontraron resultados para tu búsqueda.</div>';
+            return;
+        }
+
+        // Render Cards with Animation Stagger
+        state.filteredItems.forEach((item, index) => {
+            const card = document.createElement('div');
+            card.className = 'card';
+            card.style.animationDelay = `${index * 50}ms`; // Stagger effect
+            
+            let preview = '';
+            if (item.type === 'img') {
+                preview = `<div class="card-preview" onclick="openModal('${item.path}')">
+                             <img src="${item.path}" alt="${item.title}" loading="lazy">
+                           </div>`;
+            } else if (item.type === 'html') {
+                 preview = `<div class="card-preview">
+                             <div class="iframe-wrap"><iframe src="${item.path}" scrolling="no"></iframe></div>
+                           </div>`;
+            } else {
+                preview = `<div class="card-preview"><span class="card-icon">📄</span></div>`;
+            }
+
+            card.innerHTML = `
+                ${preview}
+                <div class="card-body">
+                    <div class="card-title" title="${item.title}">${item.title}</div>
+                    <div class="card-meta">${item.filename}</div>
+                    <div class="card-actions">
+                        <a href="${item.path}" target="_blank" class="btn btn-primary">Abrir</a>
+                        <a href="${item.path}" download class="btn btn-outline">Descargar</a>
+                    </div>
+                </div>
+            `;
+            grid.appendChild(card);
+        });
+    }
+
+    // --- Modal Logic ---
+    window.openModal = function(path) {
+        // Find index in filtered items if possible, else global
+        const idx = state.filteredItems.findIndex(i => i.path === path);
+        if (idx !== -1) {
+            state.currentImageIndex = idx;
+            modalImg.src = path;
+            modal.classList.add('show');
+        }
     }
 
     window.closeModal = function() {
-        modal.classList.remove('active');
-        setTimeout(() => modalImg.src = '', 200);
+        modal.classList.remove('show');
+        setTimeout(() => modalImg.src = '', 300);
     }
 
-    // Close on click outside
+    window.navModal = function(dir) {
+        // Filter only images from current view
+        const imagesOnly = state.filteredItems.filter(i => i.type === 'img');
+        if (imagesOnly.length === 0) return;
+        
+        // Find current image in this sub-list
+        const currentSrc = modalImg.getAttribute('src');
+        let localIdx = imagesOnly.findIndex(i => i.path === currentSrc);
+        
+        if (localIdx === -1) localIdx = 0;
+        
+        let newIdx = localIdx + dir;
+        if (newIdx < 0) newIdx = imagesOnly.length - 1;
+        if (newIdx >= imagesOnly.length) newIdx = 0;
+        
+        const nextItem = imagesOnly[newIdx];
+        
+        // Fade out slightly
+        modalImg.style.opacity = 0.5;
+        setTimeout(() => {
+            modalImg.src = nextItem.path;
+            modalImg.style.opacity = 1;
+        }, 150);
+    }
+    
+    // Close modal on background click
     modal.addEventListener('click', (e) => {
         if (e.target === modal) closeModal();
     });
 
-    // Close on Escape
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') closeModal();
-    });
+    // --- Utilities ---
+    function toggleTheme() {
+        const current = document.documentElement.getAttribute('data-theme');
+        const next = current === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        localStorage.setItem('theme', next);
+    }
 
-    // Start
+    // Run
     init();
+
 </script>
 </body>
 </html>
 """
-    # Inyección segura de JSON
     json_data = json.dumps(page_items, ensure_ascii=False)
     html_content = html_template.replace('__ITEMS_JSON__', json_data)
     html_content = html_content.replace('__RUN_ID__', run_id)
@@ -2585,494 +3099,374 @@ def generate_html_viewer(image_index, out_html_path, out_dir=OUT_DIR, run_id=Non
     try:
         with open(out_html_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
-        print(f"[viewer] Generado correctamente en: {out_html_path}")
+        print(f"[viewer] HTML profesional generado: {out_html_path}")
         return out_html_path
     except Exception as e:
         print(f"[error] No se pudo guardar el HTML: {e}")
         return None
 
+# ---------------------------------------------------------
+# CLASE PRINCIPAL: PORTFOLIO ENGINE (CORREGIDA Y COMPLETA)
+# ---------------------------------------------------------
+class PortfolioEngine:
+    def __init__(self, config):
+        self.config = config
+        self.capital = config.get('capital', 100000.0)
+        self.risk_free = config.get('risk_free', 0.08)
+        self.max_assets = config.get('max_selected_assets', 12)
+        self.seed = config.get('seed', 42)
+        
+        # Estado interno (Datos)
+        self.prices_all = None
+        self.prices_assets = None
+        self.prices_bench = None
+        self.returns_daily = None
+        self.bench_returns = None
+        
+        # Estado interno (Métricas para reportes)
+        self.mean_annual = None
+        self.vol_annual = None
+        self.betas_hist = None
+        self.cov_annual = None
+        
+        # Resultados
+        self.scenarios = {}
+        self.backtest_results = {}
+        self.sims_assets_all_log = None
+        self.sims_bench_all_log = None
+        self.sims_assets_factor_log = None
+        self.sims_factor_log = None
+        
+        # Metadata de pronósticos
+        self.cum_ports_by_scenario = {}
+        
+        np.random.seed(self.seed)
+
+    def fetch_and_filter_data(self, tickers, benchmark, start_date, end_date):
+        print(f"\n[1/6] 📥 Descargando datos ({len(tickers)} tickers)...")
+        self.prices_all = download_prices(tickers + [benchmark], start_date, end_date)
+        
+        if benchmark in self.prices_all.columns:
+            self.prices_bench = self.prices_all[benchmark].dropna()
+        else:
+            self.prices_bench = None
+
+        valid_cols = [c for c in tickers if c in self.prices_all.columns]
+        assets_data = self.prices_all[valid_cols].dropna(how='all').dropna(axis=1, how='all')
+        
+        print(f"[2/6] 🔍 Seleccionando Top-{self.max_assets} activos...")
+        r_temp = compute_returns(assets_data)
+        scores = compute_asset_scores(assets_data, r_temp)
+        top_assets = scores.head(self.max_assets).index.tolist()
+        
+        self.prices_assets = assets_data[top_assets].copy()
+        
+        if self.prices_bench is not None:
+            common = self.prices_assets.index.intersection(self.prices_bench.index)
+            self.prices_assets = self.prices_assets.loc[common]
+            self.prices_bench = self.prices_bench.loc[common]
+        
+        self.returns_daily = compute_returns(self.prices_assets)
+        self.bench_returns = compute_returns(self.prices_bench.to_frame()).iloc[:, 0] if self.prices_bench is not None else pd.Series(0, index=self.returns_daily.index)
+        
+        # Calcular métricas base necesarias para optimización y reportes
+        self.mean_annual, self.vol_annual = annualize_returns(self.returns_daily)
+        self.betas_hist = compute_betas_historical(self.returns_daily, self.bench_returns)
+        self.cov_annual = self.returns_daily.cov() * TRADING_DAYS
+
+    def run_optimizations(self):
+        print(f"\n[3/6] 🧠 Ejecutando optimizaciones y simulaciones...")
+        
+        n = len(self.prices_assets.columns)
+        # Configuración de límites (bounds)
+        min_w, max_w = 0.03, 0.20
+        if ALLOW_ZERO_WEIGHTS: min_w = 0.0
+        bounds = tuple((min_w, max_w) for _ in range(n))
+        constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1},)
+        
+        params = {
+            'mean_returns': self.mean_annual.values, 
+            'cov_matrix': self.cov_annual.values, 
+            'betas': self.betas_hist.values,
+            'bounds': bounds, 'constraints': constraints, 
+            'lam_tc': self.config.get('lam_tc', 0), 
+            'turnover_max': self.config.get('turnover_max')
+        }
+        
+        # 1. Optimizaciones Estáticas
+        self.scenarios['MinVar'] = optimize_portfolio(**params, objective_fn=obj_min_var)
+        self.scenarios['MaxSharpe'] = optimize_portfolio(**params, objective_fn=obj_max_sharpe)
+        self.scenarios['MaxReturn'] = optimize_portfolio(**params, objective_fn=obj_max_return)
+        self.scenarios['MinBeta'] = optimize_portfolio(**params, objective_fn=obj_min_beta)
+        self.scenarios['ERC'] = risk_parity_weights(self.cov_annual.values)
+        
+        # 2. Simulaciones Monte Carlo (Usando tqdm)
+        print("      🎲 Generando simulaciones Monte Carlo...")
+        returns_all = self.returns_daily.join(self.bench_returns.rename(self.config.get('benchmark','SPY')), how='inner')
+        n_sims = 500
+        sims_log = mc_simulate_multivariate_logreturns(returns_all, n_sims=n_sims)
+        
+        n_assets = len(self.prices_assets.columns)
+        self.sims_assets_all_log = sims_log[:, :, :n_assets]
+        self.sims_bench_all_log = sims_log[:, :, n_assets]
+        
+        # Optimización Robusta
+        print("      🛡️ Optimizando Robust (Avg & Worst)...")
+        # Nota: Aquí podrías envolver con tqdm si quisieras, como vimos antes
+        self.scenarios['RobustAvgMC'] = optimize_over_simulations_local(self.sims_assets_all_log, method='avg_sharpe', bounds=bounds, constraints=constraints, risk_free=self.risk_free)
+        self.scenarios['RobustWorstMC'] = optimize_over_simulations_local(self.sims_assets_all_log, method='worst_sharpe', bounds=bounds, constraints=constraints, risk_free=self.risk_free)
+        
+        # 3. Factores
+        print("      Factor Model Simulation...")
+        factors = pd.DataFrame({'MKT': self.bench_returns}).loc[self.returns_daily.index]
+        B, resid_df = fit_factor_model_log(self.returns_daily, factors)
+        self.sims_assets_factor_log, self.sims_factor_log = simulate_via_factors_with_bench_log(B, resid_df, factors, n_sims=400)
+        self.scenarios['FactorRobust'] = optimize_over_simulations_local(self.sims_assets_factor_log, method='avg_sharpe', bounds=bounds, constraints=constraints, risk_free=self.risk_free)
+
+    def run_backtest(self):
+        print(f"\n[4/6] 📉 Ejecutando Backtest histórico...")
+        self.backtest_results = {}
+        self.cum_ports_by_scenario = {}
+        
+        # Backtest histórico
+        for name, weights in self.scenarios.items():
+            w_series = pd.Series(weights, index=self.prices_assets.columns)
+            vals, _ = backtest_fixed(self.prices_assets, w_series, self.capital)
+            self.backtest_results[name] = vals
+            
+            # También pre-calculamos la proyección a futuro (para los percentiles)
+            if name == 'FactorRobust':
+                cum = get_cum_port_fullyear_per_sim(self.sims_assets_factor_log, weights)
+            else:
+                cum = get_cum_port_fullyear_per_sim(self.sims_assets_all_log, weights)
+            self.cum_ports_by_scenario[name] = cum
 
 # ---------- MAIN (pipeline) ----------
 def main():
+    # ---------------------------------------------------------
+    # 1. CONFIGURACIÓN E INPUTS
+    # ---------------------------------------------------------
     config, args = parse_args_and_config()
-    global CAPITAL_TO_DEPLOY, MAX_SELECTED_ASSETS, RISK_FREE_ANNUAL, SEED, REBALANCE_THRESHOLD
-    RISK_FREE_ANNUAL = config.get('risk_free', RISK_FREE_ANNUAL)
-    MAX_SELECTED_ASSETS = config.get('max_selected_assets', MAX_SELECTED_ASSETS)
-    CAPITAL_TO_DEPLOY = config.get('capital', CAPITAL_TO_DEPLOY)
-    SEED = config.get('seed', SEED)
-    np.random.seed(SEED)
-    benchmark = config.get('benchmark', 'SPY')
-    REBALANCE_THRESHOLD = config.get('band_base', REBALANCE_THRESHOLD)
-    lam_tc = config.get('lam_tc', 0.0)
-    turnover_max = config.get('turnover_max')
-    target_vol = config.get('target_vol')
-    sim_mode = config.get('sim_mode', 'mc')
-    costs_bps = config.get('costs_bps', 0.0)
-    cash_available = config.get('cash_available')
+    
+    # Input: Tasa Libre de Riesgo (Dinámica / México)
+    rf_input = prompt_risk_free_rate(default=0.105)
+    config['risk_free'] = rf_input
+    
+    # Input: Capital y Assets
+    cap_input = prompt_initial_capital(default=config.get('capital', 100000.0))
+    config['capital'] = cap_input
+    max_assets = prompt_max_assets(default=config.get('max_selected_assets', 12))
+    config['max_selected_assets'] = max_assets
 
+    # Actualizar globales para compatibilidad
+    global RISK_FREE_ANNUAL, CAPITAL_TO_DEPLOY, MAX_SELECTED_ASSETS
+    RISK_FREE_ANNUAL = rf_input
+    CAPITAL_TO_DEPLOY = cap_input
+    MAX_SELECTED_ASSETS = max_assets
+    
+    # ---------------------------------------------------------
+    # 2. INICIAR MOTOR Y CÁLCULOS
+    # ---------------------------------------------------------
+    engine = PortfolioEngine(config)
+    
     tickers = ['AAPL','MSFT','AMZN','GOOGL','TSLA','NVDA','AMD','LLY','META','UBER','COST','ORCL','JPM','BAC','MA','SPOT',
     'PEP','KO','PG','JNJ','MRK','PFE','DIS','NFLX','INTC','QCOM','TXN','CRM','ADBE','SHOP','V','AXP',
     'BA','CAT','GE','HON','MMM','UPS','FDX','NKE','SBUX','MCD','WMT','TGT','HD','LOW','DE','CVX','XOM','SLB',
     'BP','RIO','BHP','PLTR','PYPL','DKNG','TTD','ABNB','MAR','HLT','DAL','UAL','CCL','RCL']
-
-    start = (datetime.today() - timedelta(days=365*5)).strftime('%Y-%m-%d')
-    end = datetime.today().strftime('%Y-%m-%d')
-    initial_capital = prompt_initial_capital(default=CAPITAL_TO_DEPLOY)
-    CAPITAL_TO_DEPLOY = initial_capital
-    MAX_SELECTED_ASSETS = prompt_max_assets(default=MAX_SELECTED_ASSETS)
-    config['capital'] = CAPITAL_TO_DEPLOY
-    config['max_selected_assets'] = MAX_SELECTED_ASSETS
-
-    run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
-    manifest = {
-        'run_id': run_id,
-        'config': config,
-        'seed': SEED,
-        'date': datetime.now().isoformat(),
-        'python_version': sys.version,
-        'lib_versions': {
-            'numpy': np.__version__,
-            'pandas': pd.__version__,
-            'yfinance': yf.__version__
-        }
-    }
-    with open(os.path.join(OUT_DIR, 'manifest.json'), 'w') as fh:
-        json.dump(manifest, fh, indent=2)
-    min_weight, max_weight = 0.03, 0.20
-    n_mc_sims = 500
-    n_factor_sims = 400
-
-    print("Descargando precios (pipeline)...")
-    all_tickers = list(dict.fromkeys(tickers + [benchmark]))
-    prices = download_prices(all_tickers, start, end)
-
-    if benchmark not in prices.columns:
-        print(f"[warning] benchmark {benchmark} no encontrado en descarga. Intentando continuar sin benchmark.")
-
-    available = [c for c in tickers if c in prices.columns]
-    if len(available) == 0:
-        raise ValueError("Ningún ticker de assets descargado. Reduce lista o revisa conexión.")
-    prices_assets_all = prices[available].dropna(how='all').dropna(axis=1, how='all')
-    prices_bench = prices[benchmark].dropna() if benchmark in prices.columns else None
-
-    returns_daily_all = compute_returns(prices_assets_all)
-    if returns_daily_all.shape[0] == 0:
-        raise ValueError("No hay retornos válidos en los activos descargados.")
-    scores = compute_asset_scores(prices_assets_all, returns_daily_all)
-    top_n = min(MAX_SELECTED_ASSETS, len(scores))
-    top_assets = scores.head(top_n).index.tolist()
-    print(f"Top-{top_n} assets seleccionados por score compuesto: {top_assets}")
-
-    prices_assets = prices_assets_all[top_assets].copy()
-    if prices_bench is not None:
-        common_idx = prices_assets.index.intersection(prices_bench.index)
-        prices_assets = prices_assets.loc[common_idx].dropna(how='all')
-        prices_bench = prices_bench.loc[common_idx].dropna()
-    else:
-        prices_assets = prices_assets.dropna(how='all')
-
-    returns_daily = compute_returns(prices_assets)
-    bench_returns_daily = compute_returns(prices_bench.to_frame()).iloc[:,0] if prices_bench is not None else pd.Series(0.0, index=returns_daily.index, name='BENCH_PLACEHOLDER')
-
-    mean_annual, vol_annual = annualize_returns(returns_daily)
-    betas_hist = compute_betas_historical(returns_daily, bench_returns_daily)
-    cov_annual = returns_daily.cov() * TRADING_DAYS
-
-    n = len(prices_assets.columns)
-    if ALLOW_ZERO_WEIGHTS:
-        lb = 0.0
-        if max_weight * n < 1.0:
-            raise ValueError("max_weight * n < 1. Ajusta max_weight o reduce número de activos.")
-    else:
-        lb = min_weight
-        if min_weight * n > 1.0:
-            raise ValueError("min_weight * n > 1. Reduce min_weight o número de activos.")
-
-    bounds = tuple((lb, max_weight) for _ in range(n))
-    constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1},)
-
-    print("Optimizando baseline (MinVar, MaxSharpe, MinBeta, MaxReturn)...")
-    w_minvar = optimize_portfolio(mean_annual.values, cov_annual.values, betas_hist.values, bounds, constraints, obj_min_var,
-                                  lam_tc=lam_tc, turnover_max=turnover_max)
-    w_maxsharpe = optimize_portfolio(mean_annual.values, cov_annual.values, betas_hist.values, bounds, constraints, obj_max_sharpe,
-                                     lam_tc=lam_tc, turnover_max=turnover_max)
-    w_minbeta = optimize_portfolio(mean_annual.values, cov_annual.values, betas_hist.values, bounds, constraints, obj_min_beta,
-                                   lam_tc=lam_tc, turnover_max=turnover_max)
-    w_maxreturn = optimize_portfolio(mean_annual.values, cov_annual.values, betas_hist.values, bounds, constraints, obj_max_return,
-                                     lam_tc=lam_tc, turnover_max=turnover_max)
-    w_rp = risk_parity_weights(cov_annual.values)
-    w_target_vol = scale_to_target_vol(w_maxsharpe.copy(), cov_annual.values, target_vol) if target_vol else None
-
-    print("Simulando retornos ...")
-    returns_all = returns_daily.join(bench_returns_daily.rename(benchmark), how='inner')
-    if sim_mode == 'bootstrap':
-        sims_all_log = block_bootstrap_logreturns(returns_all, days=TRADING_DAYS, n_sims=n_mc_sims, seed=SEED)
-    else:
-        sims_all_log = mc_simulate_multivariate_logreturns(returns_all, days=TRADING_DAYS, n_sims=n_mc_sims, seed=SEED)
-    N_assets = len(prices_assets.columns)
-    sims_assets_all_log = sims_all_log[:, :, :N_assets]
-    sims_bench_all_log = sims_all_log[:, :, N_assets]
-
-    print("Optimizando robustamente sobre simulaciones (avg_sharpe & worst_sharpe)...")
-    w_robust_avg = optimize_over_simulations_local(sims_assets_all_log, method='avg_sharpe', bounds=bounds, constraints=constraints)
-    w_robust_worst = optimize_over_simulations_local(sims_assets_all_log, method='worst_sharpe', bounds=bounds, constraints=constraints)
-
-    print("Ajustando modelo factor-driven (Ridge) y simulando ...")
-    factors = pd.DataFrame({'MKT': bench_returns_daily}).loc[returns_daily.index]
-    B, resid_df = fit_factor_model_log(returns_daily, factors, alpha=1.0)
-    sims_assets_factor_log, sims_factor_log = simulate_via_factors_with_bench_log(B, resid_df, factors, days=TRADING_DAYS, n_sims=n_factor_sims, seed=SEED)
-    w_factor_robust = optimize_over_simulations_local(sims_assets_factor_log, method='avg_sharpe', bounds=bounds, constraints=constraints)
-
-    blend_weights = {
-        'MinVar': 0.15,
-        'MaxSharpe': 0.35,
-        'MaxReturn': 0.25,
-        'RobustAvgMC': 0.15,
-        'FactorRobust': 0.10
-    }
-    base_scenarios = {
-        'MinVar': w_minvar,
-        'MaxSharpe': w_maxsharpe,
-        'MinBeta': w_minbeta,
-        'MaxReturn': w_maxreturn,
-        'ERC': w_rp,
-        'RobustAvgMC': w_robust_avg,
-        'RobustWorstMC': w_robust_worst,
-        'FactorRobust': w_factor_robust
-    }
-    if w_target_vol is not None:
-        base_scenarios['TargetVol'] = w_target_vol
-    blend_targeted = np.zeros_like(w_minvar)
-    for k, v in blend_weights.items():
-        if k in base_scenarios:
-            blend_targeted += v * base_scenarios[k]
-    if np.sum(blend_targeted) > 0:
-        blend_targeted = blend_targeted / np.sum(blend_targeted)
-    stacked = np.vstack([base_scenarios[k] for k in base_scenarios.keys()])
-    ensemble_all = np.nanmean(stacked, axis=0)
-    if np.sum(ensemble_all) > 0:
-        ensemble_all = ensemble_all / np.sum(ensemble_all)
-    scenarios = {
-        'MinVar': w_minvar,
-        'MaxSharpe': w_maxsharpe,
-        'MinBeta': w_minbeta,
-        'MaxReturn': w_maxreturn,
-        'ERC': w_rp,
-        'RobustAvgMC': w_robust_avg,
-        'RobustWorstMC': w_robust_worst,
-        'FactorRobust': w_factor_robust,
-        'Blend_Targeted': blend_targeted,
-        'Ensemble_All': ensemble_all
-    }
-    if w_target_vol is not None:
-        scenarios['TargetVol'] = w_target_vol
-
-    print("Calculando métricas pronosticadas (1 año) para cada escenario ...")
-    scenario_forecasts = []
-    cum_ports_by_scenario = {}
-    for name, w in scenarios.items():
-        if name == 'FactorRobust':
-            stats = summarise_simulation_for_weights_from_log(sims_assets_factor_log, sims_factor_log, w, rf=RISK_FREE_ANNUAL)
-            cum = get_cum_port_fullyear_per_sim(sims_assets_factor_log, w)
-        else:
-            stats = summarise_simulation_for_weights_from_log(sims_assets_all_log, sims_bench_all_log, w, rf=RISK_FREE_ANNUAL)
-            cum = get_cum_port_fullyear_per_sim(sims_assets_all_log, w)
-        scenario_forecasts.append([name, stats['ExpReturn'], stats['AnnVol'], stats['Sharpe'], stats['BetaSim'], stats['VaR95']])
-        cum_ports_by_scenario[name] = cum
-
-    forecast_df = pd.DataFrame(scenario_forecasts, columns=['Escenario','ExpReturn_1Y','AnnVol_1Y','Sharpe','BetaSim','VaR95']).set_index('Escenario')
-    save_table_image(forecast_df.round(6), os.path.join(OUT_DIR, 'forecast_by_scenario.png'), title='Pronóstico 1A por Escenario (MC/Factor)')
-
-    print("Generando tabla por activo ...")
-    assets_forecast_df = summarise_assets_from_sims_log(sims_assets_all_log, sims_bench_all_log, asset_names=prices_assets.columns)
-    assets_forecast_df['BetaHist'] = betas_hist.reindex(assets_forecast_df.index).values
-    assets_forecast_df['Hist_AnnReturn'] = mean_annual.reindex(assets_forecast_df.index).values
-    assets_forecast_df['Hist_AnnVol'] = vol_annual.reindex(assets_forecast_df.index).values
-    assets_forecast_df = assets_forecast_df[['BetaHist','BetaSim','Hist_AnnReturn','ExpReturn_1Y','Hist_AnnVol','Vol_1Y']]
-    save_table_image(assets_forecast_df.round(6), os.path.join(OUT_DIR, 'assets_forecast_table.png'), title='Activos: BetaHist | BetaSim | Rendim Hist | Rendim 1Y Sim | Vol Hist | Vol 1Y Sim')
-
-    weights_table = pd.DataFrame({name: np.asarray(w) for name,w in scenarios.items()}, index=prices_assets.columns).T
-    save_table_image(weights_table.round(6), os.path.join(OUT_DIR, 'weights_per_scenario_full.png'), title='Pesos por Escenario (completo)')
-    save_weights_compact_table(scenarios, list(prices_assets.columns), os.path.join(OUT_DIR, 'weights_compact.png'), title='Pesos por Escenario (compacto, sólo >0)')
-
-    # contribuciones de riesgo por escenario
-    rc_tables = {}
-    for name, w in scenarios.items():
-        rc, rc_pct = risk_contributions(cov_annual.values, np.asarray(w))
-        rc_df = pd.DataFrame({'RC': rc, 'RC_Pct': rc_pct}, index=prices_assets.columns)
-        rc_tables[name] = rc_df
-    if rc_tables:
-        rc_concat = pd.concat({k: v for k, v in rc_tables.items()}, axis=0)
-        rc_csv = os.path.join(OUT_DIR, 'risk_contributions.csv')
-        rc_concat.to_csv(rc_csv)
-
-    # Backtests (escalados a CAPITAL_TO_DEPLOY)
-    print("Generando backtest comparativo (solo gráfico) ...")
-    backtest_results = {}
-    final_shares_by_scenario = {}
-    for name, w in scenarios.items():
-        w_series = pd.Series(w, index=prices_assets.columns)
-        pf_fixed, shares = backtest_fixed(prices_assets, w_series, initial_capital)
-        backtest_results[name] = pf_fixed
-        final_shares_by_scenario[name] = shares
-
-    ret_map = {n: (s.iloc[-1] / s.iloc[0] - 1) for n, s in backtest_results.items() if not s.empty}
-    period_label = "Return % (5Y backtest)" if (prices_assets.index[-1] - prices_assets.index[0]).days >= 365*5 else "Return % (since start)"
-    backtest_summary_df = pd.DataFrame({'Scenario': list(ret_map.keys()), period_label: list(ret_map.values())}).set_index('Scenario')
-    backtest_summary_path = os.path.join(OUT_DIR, 'backtest_summary.csv')
-    backtest_summary_df[period_label] = backtest_summary_df[period_label].apply(lambda x: f"{x:.2%}" if pd.notnull(x) else "")
-    backtest_summary_df.to_csv(backtest_summary_path)
-
-    latest_prices = prices_assets.ffill().iloc[-1]
-    investment_plans = compute_investment_plan_per_scenario(scenarios, latest_prices, CAPITAL_TO_DEPLOY)
-    for name, df in investment_plans.items():
-        df[period_label] = ret_map.get(name, np.nan)
-        df[period_label] = df[period_label].apply(lambda x: f"{x:.2%}" if pd.notnull(x) else "")
-    inv_image_paths = save_investment_tables(investment_plans, OUT_DIR)
-
-    # Walk-forward validation (simple)
-    wf_fn = lambda mean, cov: optimize_portfolio(mean, cov, np.zeros_like(mean), bounds, constraints, obj_max_sharpe,
-                                                lam_tc=lam_tc, turnover_max=turnover_max)
-    wf_table = walk_forward_analysis(prices_assets, wf_fn, splits=3)
-    wf_csv = os.path.join(OUT_DIR, 'walk_forward.csv')
-    wf_table.to_csv(wf_csv, index=False)
-
-    bench_line = None
-    if prices_bench is not None:
-        bench_prices = prices_bench.ffill()
-        if not bench_prices.empty:
-            bench_line = (bench_prices / bench_prices.iloc[0]) * CAPITAL_TO_DEPLOY
-
-    plt.figure(figsize=(12,8))
-    for idx, (name, series) in enumerate(backtest_results.items()):
-        try:
-            start_val = series.iloc[0]
-            scaled = (series / start_val) * CAPITAL_TO_DEPLOY
-            scaled.plot(label=f'{name} (Fixed)', color=PALETTE(idx % 10))
-        except Exception:
-            (series / series.iloc[0]).plot(label=f'{name} (Fixed)', color=PALETTE(idx % 10))
-    if bench_line is not None:
-        bench_line.plot(label=f'Benchmark ({benchmark})', color='black', linewidth=2, linestyle='--')
-
-    plt.title(f'Comparativo Histórico - Portafolios (inicio = ${CAPITAL_TO_DEPLOY:.2f}) vs {benchmark}')
-    plt.ylabel("Portfolio value ($)")
-    plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
-    plt.tight_layout()
-    graph_path = os.path.join(OUT_DIR, 'backtest_comparative.png')
-    plt.savefig(graph_path, dpi=200, bbox_inches='tight')
-    plt.close()
-    print(f"[saved] {graph_path}")
-
-    interactive_path = os.path.join(OUT_DIR, 'backtest_interactive.html')
-    make_backtest_plotly(backtest_results, bench_line, CAPITAL_TO_DEPLOY, interactive_path, colorblind_mode=config.get('colorblind_mode', True))
-
-    # Diagnostics
-    corr_path = os.path.join(OUT_DIR, 'correlation_heatmap.png')
-    save_correlation_heatmap(returns_daily, corr_path, title="Mapa de calor: Correlaciones (Top assets)")
-
-    rolling_paths = []
-    dd_paths = []
-    for name, series in backtest_results.items():
-        ret = series.pct_change().dropna()
-        sharpe_p = os.path.join(OUT_DIR, f'rolling_sharpe_{name}.png')
-        vol_p = os.path.join(OUT_DIR, f'rolling_vol_{name}.png')
-        plot_rolling_metrics(ret, sharpe_p, vol_p, window=ROLLING_WINDOW)
-        rolling_paths += [sharpe_p, vol_p]
-        dd_p = os.path.join(OUT_DIR, f'drawdown_{name}.png')
-        plot_drawdown_summary(series, dd_p, title=f"Drawdown - {name}")
-        dd_paths.append(dd_p)
-
-    # Rebalanceo con administrador de carteras
-    alerts_path, alerts_plot_path, actions_path, impact_path, trades_csv = rebalance_flow(prices_assets, scenarios, initial_capital, config)
-
-    # Percentiles & VaR/CVaR
-    perc_rows = {}
-    for name, cum in cum_ports_by_scenario.items():
-        perc = np.percentile(cum, [5,25,50,75,95])
-        perc_rows[name] = perc
-    perc_df = pd.DataFrame(perc_rows, index=['p5','p25','p50','p75','p95']).T
-    perc_df_path = os.path.join(OUT_DIR, 'percentiles_by_scenario.png')
-    save_table_image(perc_df, perc_df_path, title='Percentiles 1A por Escenario (5/25/50/75/95)')
-
-    horizons = {'VaR_1d':1, 'VaR_5d':5, 'VaR_21d':21, 'VaR_252d':252}
-    c_horiz = {'CVaR_1d':1, 'CVaR_5d':5, 'CVaR_21d':21, 'CVaR_252d':252}
-    var_rows = {}
-    cvar_rows = {}
-    for name, w in scenarios.items():
-        var_vals = []
-        cvar_vals = []
-        s_log = sims_assets_factor_log if name == 'FactorRobust' else sims_assets_all_log
-        for h in horizons.values():
-            try:
-                var_vals.append(var95_from_sims_horizon(s_log, w, h))
-            except Exception:
-                var_vals.append(np.nan)
-        for h in c_horiz.values():
-            try:
-                cvar_vals.append(cvar95_from_sims_horizon(s_log, w, h))
-            except Exception:
-                cvar_vals.append(np.nan)
-        var_rows[name] = var_vals
-        cvar_rows[name] = cvar_vals
-    var_df = pd.DataFrame(var_rows, index=list(horizons.keys())).T
-    cvar_df = pd.DataFrame(cvar_rows, index=list(c_horiz.keys())).T
-    var_df_path = os.path.join(OUT_DIR, 'var_by_horizon.png')
-    cvar_df_path = os.path.join(OUT_DIR, 'cvar_by_horizon.png')
-    save_table_image(var_df, var_df_path, title='VaR95 por Horizonte (desde MC)')
-    save_table_image(cvar_df, cvar_df_path, title='CVaR95 (ES) por Horizonte (desde MC)')
-
-    # Stress tests (extended)
-    print("Descargando histórico extendido para stress tests (si es necesario)...")
-    stress_start = "2006-01-01"
-    stress_paths = []
+    
+    start_date = (datetime.today() - timedelta(days=365*5)).strftime('%Y-%m-%d')
+    end_date = datetime.today().strftime('%Y-%m-%d')
+    
     try:
-        prices_stress = download_prices(prices_assets.columns.tolist(), start=stress_start, end=end)
-        stress_paths = stress_test_crises(prices_stress,
-                                  scenarios,
-                                  crises=None,
-                                  out_dir=OUT_DIR,
-                                  reference_index=prices_assets.columns,
-                                  palette=list(plt.get_cmap('tab10').colors),
-                                  debug_save=True)
-    except Exception as e:
-        print("[stress] No se pudo descargar históricos extendidos:", e)
-        stress_paths = []
+        # A. Descarga y Optimización
+        engine.fetch_and_filter_data(tickers, config.get('benchmark', 'SPY'), start_date, end_date)
+        engine.run_optimizations()
+        engine.run_backtest()
+        
+        # ---------------------------------------------------------
+        # 3. GENERACIÓN DE REPORTES (Restaurando TODO lo perdido)
+        # ---------------------------------------------------------
+        print(f"\n[5/6] 📊 Generando TODOS los reportes y gráficos...")
+        
+        # A. Pronósticos y Métricas (Forecasts)
+        scenario_forecasts = []
+        for name, w in engine.scenarios.items():
+            if name == 'FactorRobust':
+                stats = summarise_simulation_for_weights_from_log(engine.sims_assets_factor_log, engine.sims_factor_log, w, rf=RISK_FREE_ANNUAL)
+            else:
+                stats = summarise_simulation_for_weights_from_log(engine.sims_assets_all_log, engine.sims_bench_all_log, w, rf=RISK_FREE_ANNUAL)
+            scenario_forecasts.append([name, stats['ExpReturn'], stats['AnnVol'], stats['Sharpe'], stats['BetaSim'], stats['VaR95']])
+        
+        forecast_df = pd.DataFrame(scenario_forecasts, columns=['Escenario','ExpReturn_1Y','AnnVol_1Y','Sharpe','BetaSim','VaR95']).set_index('Escenario')
+        save_table_image(forecast_df.round(6), os.path.join(OUT_DIR, 'forecast_by_scenario.png'), title='Pronóstico 1A por Escenario')
 
-    # Drawdown summary table
-    dd_summary_rows = []
-    for name, series in backtest_results.items():
-        try:
+        # B. Tabla por Activos
+        assets_forecast_df = summarise_assets_from_sims_log(engine.sims_assets_all_log, engine.sims_bench_all_log, asset_names=engine.prices_assets.columns)
+        assets_forecast_df['BetaHist'] = engine.betas_hist.reindex(assets_forecast_df.index).values
+        assets_forecast_df['Hist_AnnReturn'] = engine.mean_annual.reindex(assets_forecast_df.index).values
+        assets_forecast_df['Hist_AnnVol'] = engine.vol_annual.reindex(assets_forecast_df.index).values
+        assets_forecast_df = assets_forecast_df[['BetaHist','BetaSim','Hist_AnnReturn','ExpReturn_1Y','Hist_AnnVol','Vol_1Y']]
+        save_table_image(assets_forecast_df.round(6), os.path.join(OUT_DIR, 'assets_forecast_table.png'), title='Detalle por Activo')
+
+        # C. Pesos y Contribuciones
+        save_weights_compact_table(engine.scenarios, list(engine.prices_assets.columns), os.path.join(OUT_DIR, 'weights_compact.png'), title='Pesos Compactos')
+        weights_table = pd.DataFrame({name: np.asarray(w) for name,w in engine.scenarios.items()}, index=engine.prices_assets.columns).T
+        save_table_image(weights_table.round(6), os.path.join(OUT_DIR, 'weights_per_scenario_full.png'), title='Pesos Completos')
+        
+        # Risk Contributions (CSV)
+        rc_tables = {}
+        for name, w in engine.scenarios.items():
+            rc, rc_pct = risk_contributions(engine.cov_annual.values, np.asarray(w))
+            rc_tables[name] = pd.DataFrame({'RC': rc, 'RC_Pct': rc_pct}, index=engine.prices_assets.columns)
+        if rc_tables:
+            pd.concat(rc_tables, axis=0).to_csv(os.path.join(OUT_DIR, 'risk_contributions.csv'))
+
+        # D. Gráficos de Backtest (Estático e Interactivo)
+        plt.figure(figsize=(12,8))
+        for name, series in engine.backtest_results.items():
+            plt.plot(series.index, series.values, label=name)
+        if engine.prices_bench is not None:
+            b_line = (engine.prices_bench / engine.prices_bench.iloc[0]) * engine.capital
+            plt.plot(b_line.index, b_line.values, 'k--', label='Benchmark', alpha=0.7)
+        plt.title(f'Backtest Comparativo (Inicio ${engine.capital:,.2f})')
+        plt.legend()
+        plt.tight_layout()
+        graph_path = os.path.join(OUT_DIR, 'backtest_comparative.png')
+        plt.savefig(graph_path, dpi=200, bbox_inches='tight'); plt.close()
+        
+        interactive_path = os.path.join(OUT_DIR, 'backtest_interactive.html')
+        bench_val = (engine.prices_bench / engine.prices_bench.iloc[0]) * engine.capital if engine.prices_bench is not None else None
+        make_backtest_plotly(engine.backtest_results, bench_val, engine.capital, interactive_path, config.get('colorblind_mode', True))
+
+        # E. Diagnósticos (Correlación y Walk Forward)
+        corr_path = os.path.join(OUT_DIR, 'correlation_heatmap.png')
+        save_correlation_heatmap(engine.returns_daily, corr_path, title="Correlaciones")
+        
+        # F. Rolling Metrics y Drawdowns (Loop)
+        rolling_paths = []
+        dd_paths = []
+        dd_summary_rows = []
+        
+        # Usamos tqdm para ver progreso de generación de imágenes
+        print("      Generando gráficos individuales...")
+        for name, series in tqdm(engine.backtest_results.items(), desc="Plots"):
+            ret = series.pct_change().dropna()
+            sharpe_p = os.path.join(OUT_DIR, f'rolling_sharpe_{name}.png')
+            vol_p = os.path.join(OUT_DIR, f'rolling_vol_{name}.png')
+            dd_p = os.path.join(OUT_DIR, f'drawdown_{name}.png')
+            
+            plot_rolling_metrics(ret, sharpe_p, vol_p, window=ROLLING_WINDOW)
+            plot_drawdown_summary(series, dd_p, title=f"Drawdown - {name}")
+            
+            rolling_paths.extend([sharpe_p, vol_p])
+            dd_paths.append(dd_p)
+            
+            # Datos para tabla resumen de DD
             dd, max_dd, peak, trough, rec_days = compute_drawdown(series)
-            dd_summary_rows.append({
-                "Scenario": name,
-                "MaxDrawdown": max_dd,
-                "PeakDate": peak if peak is not None else "",
-                "TroughDate": trough if trough is not None else "",
-                "RecoveryDays": rec_days if rec_days is not None else ""
-            })
+            dd_summary_rows.append({"Scenario": name, "MaxDrawdown": max_dd, "Peak": peak, "RecoveryDays": rec_days})
+
+        # Tabla resumen Drawdown
+        if dd_summary_rows:
+            dd_df = pd.DataFrame(dd_summary_rows).set_index('Scenario')
+            dd_df['MaxDrawdown'] = dd_df['MaxDrawdown'].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+            dd_sum_path = os.path.join(OUT_DIR, 'drawdown_summary_by_scenario.png')
+            save_table_image(dd_df, dd_sum_path, title="Resumen de Drawdowns")
+        else:
+            dd_sum_path = None
+
+        # G. VaR, CVaR y Percentiles
+        perc_rows = {name: np.percentile(cum, [5,25,50,75,95]) for name, cum in engine.cum_ports_by_scenario.items()}
+        perc_df = pd.DataFrame(perc_rows, index=['p5','p25','p50','p75','p95']).T
+        perc_path = os.path.join(OUT_DIR, 'percentiles_by_scenario.png')
+        save_table_image(perc_df, perc_path, title='Percentiles Simulados (1 Año)')
+        
+        # VaR/CVaR Horizons
+        horizons = {'VaR_1d':1, 'VaR_5d':5, 'VaR_21d':21}
+        var_rows = {}
+        for name, w in engine.scenarios.items():
+            vals = []
+            s_log = engine.sims_assets_factor_log if name=='FactorRobust' else engine.sims_assets_all_log
+            for h in horizons.values():
+                vals.append(var95_from_sims_horizon(s_log, w, h))
+            var_rows[name] = vals
+        var_df = pd.DataFrame(var_rows, index=horizons.keys()).T
+        var_path = os.path.join(OUT_DIR, 'var_by_horizon.png')
+        save_table_image(var_df, var_path, title='VaR 95% por Horizonte')
+
+        # H. Investment Plans (Cuántas acciones comprar)
+        latest_prices = engine.prices_assets.ffill().iloc[-1]
+        inv_plans = compute_investment_plan_per_scenario(engine.scenarios, latest_prices, engine.capital)
+        inv_paths = save_investment_tables(inv_plans, OUT_DIR)
+
+        # ---------------------------------------------------------
+        # 4. ADMINISTRADOR DE CARTERAS (RESTAURADO)
+        # ---------------------------------------------------------
+        print(f"\n[6/6] 💼 Iniciando Administrador de Carteras y Rebalanceo...")
+        # Esta es la función que permite Guardar/Cargar/Editar carteras y genera alertas
+        alerts_path, alerts_plot_path, actions_path, impact_path, trades_csv = rebalance_flow(
+            engine.prices_assets, engine.scenarios, engine.capital, config
+        )
+
+        # I. Stress Tests (Extended)
+        print("      Ejecutando Stress Tests históricos...")
+        try:
+            stress_prices = download_prices(list(engine.prices_assets.columns), "2007-01-01", end_date)
+            stress_paths = stress_test_crises(stress_prices, engine.scenarios, out_dir=OUT_DIR, reference_index=engine.prices_assets.columns)
         except Exception as e:
-            dd_summary_rows.append({
-                "Scenario": name,
-                "MaxDrawdown": np.nan,
-                "PeakDate": "",
-                "TroughDate": "",
-                "RecoveryDays": ""
-            })
-            print(f"[drawdown summary] error para {name}: {e}")
-    if len(dd_summary_rows) > 0:
-        dd_summary_df = pd.DataFrame(dd_summary_rows).set_index('Scenario')
-    else:
-        dd_summary_df = pd.DataFrame(columns=['MaxDrawdown','PeakDate','TroughDate','RecoveryDays'])
-    dd_summary_path = os.path.join(OUT_DIR, 'drawdown_summary_by_scenario.png')
-    try:
-        dd_summary_df_display = dd_summary_df.copy()
-        if 'MaxDrawdown' in dd_summary_df_display.columns:
-            dd_summary_df_display['MaxDrawdown'] = dd_summary_df_display['MaxDrawdown'].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
-        save_table_image(dd_summary_df_display, dd_summary_path, title="Resumen Drawdown por Escenario")
-        print(f"[saved] {dd_summary_path}")
-    except Exception as e:
-        print(f"[drawdown summary] no se pudo guardar imagen: {e}")
+            print(f"      [!] No se pudieron ejecutar Stress Tests completos: {e}")
+            stress_paths = []
 
-    # Combine images into PDF
-    images_list = [
-        os.path.join(OUT_DIR, 'weights_compact.png'),
-        os.path.join(OUT_DIR, 'weights_per_scenario_full.png'),
-        os.path.join(OUT_DIR, 'assets_forecast_table.png'),
-        os.path.join(OUT_DIR, 'forecast_by_scenario.png'),
-        graph_path,
-        corr_path,
-        alerts_path,
-        alerts_plot_path,
-        perc_df_path,
-        var_df_path,
-        cvar_df_path,
-        dd_summary_path
-    ]
-    images_list += inv_image_paths
-    images_list += rolling_paths + dd_paths + stress_paths
-    images_list = [p for i, p in enumerate(images_list) if p and os.path.exists(p) and (p not in images_list[:i])]
-    out_pdf = os.path.join(OUT_DIR, 'report_all_images.pdf')
-    images_to_pdf(images_list, out_pdf)
+        # ---------------------------------------------------------
+        # 5. GENERAR VISOR HTML FINAL
+        # ---------------------------------------------------------
+        image_index = {}
+        def add(cat, path, title=None):
+            if path and os.path.exists(path):
+                t = title if title else os.path.basename(path)
+                image_index.setdefault(cat, []).append((t, path))
+        
+        # Llenar índice para el visor
+        add('Comparativa', interactive_path, 'Interactivo')
+        add('Comparativa', graph_path, 'Estático')
+        add('Forecasts', os.path.join(OUT_DIR, 'forecast_by_scenario.png'), 'Escenarios')
+        add('Forecasts', os.path.join(OUT_DIR, 'assets_forecast_table.png'), 'Activos')
+        add('Pesos', os.path.join(OUT_DIR, 'weights_compact.png'), 'Compacto')
+        add('Pesos', os.path.join(OUT_DIR, 'weights_per_scenario_full.png'), 'Completo')
+        add('Riesgo', var_path, 'VaR')
+        add('Riesgo', perc_path, 'Percentiles')
+        if dd_sum_path: add('Riesgo', dd_sum_path, 'Drawdowns Resumen')
+        
+        for p in stress_paths: add('Stress Tests', p)
+        
+        # Agregar gráficos de rebalanceo si se generaron
+        if alerts_path: add('Rebalanceo', alerts_path, 'Alertas')
+        if actions_path: add('Rebalanceo', actions_path, 'Sugerencias')
+        if impact_path: add('Rebalanceo', impact_path, 'Impacto')
+        
+        # Agregar planes de inversión
+        for p in inv_paths: add('Inversiones', p)
+        
+        # Agregar gráficos individuales
+        for name in engine.scenarios.keys():
+            add(name, os.path.join(OUT_DIR, f'drawdown_{name}.png'), 'Drawdown')
+            add(name, os.path.join(OUT_DIR, f'rolling_sharpe_{name}.png'), 'Sharpe')
 
-    print("Proceso completado. Revisa la carpeta 'outputs' para las imágenes y el PDF.")
-    print(f"PDF generado: {out_pdf}")
-
-    # HTML viewer
-    # HTML viewer (sin duplicar)
-    # ----------------------------------------
-    # HTML viewer (Organizado por Categorías)
-    # ----------------------------------------
-    image_index = {}
-
-    def add(cat, path, title=None):
-        if path and os.path.exists(path):
-            # Si no se da título, usar el nombre del archivo
-            t = title if title else os.path.basename(path)
-            image_index.setdefault(cat, []).append((t, path))
-
-    # 1. Comparativa Global (Backtest)
-    add('Comparativa', graph_path, 'Backtest Comparativo')
-    if os.path.exists(interactive_path):
-        add('Comparativa', interactive_path, 'Backtest Interactivo (Plotly)')
-
-    # 2. Pesos y Asignación (Weights & Allocations)
-    add('Pesos y Asignación', os.path.join(OUT_DIR, 'weights_compact.png'), 'Tabla Compacta')
-    add('Pesos y Asignación', os.path.join(OUT_DIR, 'weights_per_scenario_full.png'), 'Tabla Completa')
-    # Añadimos aquí también las inversiones sugeridas por escenario
-    for name in scenarios.keys():
-        add('Pesos y Asignación', os.path.join(OUT_DIR, f"investments_{name}.png"), f"Inversión: {name}")
-    add('Pesos y Asignación', os.path.join(OUT_DIR, "investments_all_scenarios.png"), "Inversiones Consolidadas")
-
-    # 3. Proyecciones (Forecasts)
-    add('Proyecciones', os.path.join(OUT_DIR, 'forecast_by_scenario.png'), 'Pronóstico por Escenario')
-    add('Proyecciones', os.path.join(OUT_DIR, 'assets_forecast_table.png'), 'Pronóstico por Activo')
-    add('Proyecciones', corr_path, 'Mapa de Calor (Correlaciones)')
-
-    # 4. Riesgo (VaR / CVaR / Stress)
-    add('Riesgo', os.path.join(OUT_DIR, 'var_by_horizon.png'), 'VaR (Value at Risk)')
-    add('Riesgo', os.path.join(OUT_DIR, 'cvar_by_horizon.png'), 'CVaR (Expected Shortfall)')
-    add('Riesgo', perc_df_path, 'Percentiles Simulados')
-    for p in stress_paths:
-        add('Riesgo (Stress Test)', p)
-    add('Riesgo', dd_summary_path, 'Resumen Drawdowns')
-
-    # 5. Rebalanceo (Alertas y Trades)
-    if alerts_path: add('Rebalanceo', alerts_path, 'Alertas (Tabla)')
-    if alerts_plot_path: add('Rebalanceo', alerts_plot_path, 'Alertas (Gráfico)')
-    if actions_path: add('Rebalanceo', actions_path, 'Sugerencias (Trades)')
-    if impact_path: add('Rebalanceo', impact_path, 'Impacto Económico')
-
-    # 6. Detalles por Portafolio (Categoría individual para cada uno)
-    # Aquí es donde "picas a la categoría que quieras" para ver solo ese portafolio
-    for name in scenarios.keys():
-        # Agrupamos métricas específicas de cada portafolio bajo su propio nombre
-        add(name, os.path.join(OUT_DIR, f"drawdown_{name}.png"), "Drawdown Histórico")
-        add(name, os.path.join(OUT_DIR, f"rolling_sharpe_{name}.png"), "Rolling Sharpe")
-        add(name, os.path.join(OUT_DIR, f"rolling_vol_{name}.png"), "Rolling Volatility")
-        # Si quisieras ver los pesos de este portafolio aquí también, descomenta la siguiente línea:
-        # add(name, os.path.join(OUT_DIR, f"investments_{name}.png"), "Detalle Inversión")
-
-    # Generar el HTML final
-    html_path = os.path.join(OUT_DIR, 'viewer.html')
-    generated_path = generate_html_viewer(image_index, html_path, out_dir=OUT_DIR, run_id=run_id)
-
-    # Intentar abrir
-    if generated_path:
+        # Generar HTML
+        html_path = os.path.join(OUT_DIR, 'viewer.html')
+        generate_html_viewer(image_index, html_path, run_id=datetime.now().strftime('%H:%M'))
+        
+        print(f"\n✅ ¡Todo listo! Abre el visor: {html_path}")
         try:
-            url = 'file://' + os.path.abspath(generated_path)
-            webbrowser.open(url)
-            print(f"[viewer] Abriendo: {url}")
-        except Exception:
-            print(f"[viewer] Abre manualmente: {generated_path}")
-
-    plt.close('all')
-    if TK_AVAILABLE:
-        try:
-            tk._default_root.destroy()
-        except Exception:
+            webbrowser.open('file://' + os.path.abspath(html_path))
+        except:
             pass
-    gc.collect()
-    sys.exit(0)
+
+    except KeyboardInterrupt:
+        print("\n❌ Interrumpido.")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     main()
