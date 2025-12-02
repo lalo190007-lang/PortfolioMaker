@@ -2350,251 +2350,246 @@ def rebalance_alerts_for_scenarios(scenarios, prices, initial_capital=100000,
 # ---------- HTML VIEWER (sin error de format con llaves) ----------
 def generate_html_viewer(image_index, out_html_path, out_dir=OUT_DIR, run_id=None):
     """
-    Viewer avanzado con:
-      - menú lateral por categorías
-      - búsqueda con highlight
-      - modal (ESC para cerrar, ←/→ para navegar, doble click = zoom)
-      - deduplicación por nombre de archivo
-      - soporte para 'Interactivo' (iframe)
+    Genera un visor HTML robusto con categorías laterales y visor modal.
     """
-    # --- construir items (dedupe por filename) ---
-    seen = set()
+    # Preparar lista plana de items
     page_items = []
     cat_counts = {}
+    
+    # Conjunto para evitar duplicados por nombre de archivo
+    seen_files = set()
 
-    def push(cat, title, path, is_html=False, is_csv=False):
-        if not path:
-            return
-        base = os.path.basename(path)
-        # dedupe global por filename
-        if base in seen:
-            return
-        seen.add(base)
-        # copia a outputs si viene de fuera
-        dest = os.path.join(out_dir, base)
-        copied = False
-        if os.path.abspath(path) != os.path.abspath(dest):
-            try:
-                os.makedirs(out_dir, exist_ok=True)
-                shutil.copy(path, dest)
-                copied = True
-            except Exception:
-                copied = False
-        # si no existe ni en dest ni en origen, no agregar
-        if not (os.path.exists(dest) or os.path.exists(path)):
-            print(f"[viewer] missing file: {path}")
-            return
-        # decidir ruta efectiva para el HTML
-        if os.path.exists(dest):
-            rel_path = os.path.basename(dest)  # dentro de out_dir basta el nombre
-        else:
-            # no se pudo copiar: usar ruta relativa respecto a out_dir (puede contener ../)
-            try:
-                rel_path = os.path.relpath(os.path.abspath(path), start=os.path.abspath(out_dir))
-            except Exception:
-                rel_path = base
-        page_items.append({
-            "category": cat,
-            "title": str(title),
-            "file": base,
-            "path": rel_path,
-            "is_html": bool(is_html),
-            "is_csv": bool(is_csv)
-        })
-        cat_counts[cat] = cat_counts.get(cat, 0) + 1
-
-    # 1) lo que venga en image_index
+    # Procesar el índice de imágenes
     for cat, items in (image_index or {}).items():
         for title, path in items:
-            is_html = str(path).lower().endswith(".html")
-            is_csv  = str(path).lower().endswith(".csv")
-            push(cat, title, path, is_html=is_html, is_csv=is_csv)
+            if not path or not os.path.exists(path):
+                continue
+            
+            filename = os.path.basename(path)
+            
+            # Evitar duplicados visuales si el mismo archivo está en varias categorías? 
+            # El usuario pide categorizar, así que permitimos el mismo archivo en distintas categorías
+            # si fuera necesario, pero idealmente copiamos una sola vez.
+            
+            # Copiar a carpeta de salida si es necesario
+            dest = os.path.join(out_dir, filename)
+            try:
+                if os.path.abspath(path) != os.path.abspath(dest):
+                    shutil.copy2(path, dest)
+            except Exception:
+                pass # Si falla copia, intentamos usar ruta original relativa
+            
+            # Determinar ruta relativa para el HTML
+            if os.path.exists(dest):
+                rel_path = filename
+            else:
+                rel_path = os.path.relpath(path, start=out_dir)
 
-    # 2) detectar HTML y CSV sueltos (desactivado para evitar duplicados)
-    # try:
-    #     for fn in os.listdir(out_dir):
-    #         if fn == os.path.basename(out_html_path):
-    #             continue
-    #         lower = fn.lower()
-    #         full = os.path.join(out_dir, fn)
-    #         if not os.path.exists(full):
-    #             continue
-    #         if lower.endswith(".html"):
-    #             title = 'Backtest (Interactivo)' if fn == 'backtest_interactive.html' else os.path.splitext(fn)[0]
-    #             push('Interactivo', title, full, is_html=True)
-    #         elif lower.endswith(".csv"):
-    #             push('Datos', os.path.splitext(fn)[0], full, is_csv=True)
-    # except Exception:
-    #     pass
+            is_html = filename.lower().endswith('.html')
+            is_csv = filename.lower().endswith('.csv')
+            
+            item = {
+                "category": cat,
+                "title": title,
+                "path": rel_path,
+                "filename": filename,
+                "type": "html" if is_html else ("csv" if is_csv else "img")
+            }
+            page_items.append(item)
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
 
-    # --- HTML UI (modal, búsqueda, menús, etc.) ---
-    run_id = run_id or datetime.now().strftime('%Y%m%d%H%M%S')
-    gen_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    run_id = run_id or datetime.now().strftime('%Y-%m-%d %H:%M')
 
-    html = """<!doctype html>
+    # Plantilla HTML autocontenida
+    html_template = """<!DOCTYPE html>
 <html lang="es">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<base href="./">
-<title>Portfolio - Viewer (HTML)</title>
-<style>
-:root{--bg:#f5f5f7;--card:#fff;--text:#222;--muted:#666;--border:#e4e4e7;--radius:14px;--font:'Inter','Segoe UI',Roboto,Arial,sans-serif}
-.dark{--bg:#17181a;--card:#1f2124;--text:#e6e6e6;--muted:#a6a6a6;--border:#2a2d31}
-*{box-sizing:border-box}body{margin:0;font-family:var(--font);background:var(--bg);color:var(--text)}
-header{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--border);padding:10px 16px;display:flex;gap:12px;align-items:center}
-h1{margin:0;font-size:18px} .gen{margin-left:auto;font-size:12px;color:var(--muted)}
-.btn{border:1px solid var(--border);background:var(--card);border-radius:10px;padding:6px 10px;cursor:pointer}
-.search{flex:1;position:relative}
-.search input{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:10px;background:var(--card);color:var(--text)}
-.container{display:flex;gap:14px;padding:14px}
-aside{width:220px;position:sticky;top:64px;height:calc(100dvh - 72px);overflow:auto;padding-right:2px}
-.cat{display:block;width:100%;text-align:left;margin:6px 0;padding:6px 10px;background:var(--card);border:1px solid var(--border);border-radius:999px;cursor:pointer}
-.cat.active{background:#0d6efd;border-color:#0d6efd;color:#fff}
-.grid{flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:10px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-.card:hover{box-shadow:0 8px 20px rgba(0,0,0,.10);transform:translateY(-2px);transition:.2s}
-.img{width:100%;height:170px;object-fit:contain;border:1px solid var(--border);border-radius:10px;background:#fff}
-.title{font-size:13px;font-weight:600;margin-top:6px}
-.file{font-size:11px;color:var(--muted);line-height:1.2}
-.toolbar{position:absolute;top:8px;right:8px;display:flex;gap:6px;opacity:.0}
-.card:hover .toolbar{opacity:1}
-.tool{border:1px solid var(--border);background:var(--card);border-radius:8px;padding:4px;cursor:pointer}
-.iframe{width:100%;height:560px;border:1px solid var(--border);border-radius:10px;background:#fff}
-footer{padding:16px;color:var(--muted);text-align:center;font-size:12px}
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visor de Portafolios</title>
+    <style>
+        :root { --primary: #2563eb; --bg: #f8fafc; --sidebar: #ffffff; --text: #1e293b; --border: #e2e8f0; }
+        body { font-family: -apple-system, system-ui, sans-serif; margin: 0; background: var(--bg); color: var(--text); display: flex; height: 100vh; overflow: hidden; }
+        
+        /* Sidebar */
+        aside { width: 260px; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 1rem; overflow-y: auto; flex-shrink: 0; }
+        h1 { font-size: 1.2rem; margin: 0 0 1.5rem 0; color: var(--primary); font-weight: 700; }
+        .nav-btn { display: block; width: 100%; text-align: left; padding: 0.75rem 1rem; margin-bottom: 0.25rem; border: none; background: transparent; color: var(--text); cursor: pointer; border-radius: 0.5rem; font-size: 0.95rem; transition: all 0.2s; }
+        .nav-btn:hover { background: #f1f5f9; }
+        .nav-btn.active { background: var(--primary); color: white; font-weight: 500; }
+        .badge { float: right; opacity: 0.7; font-size: 0.8em; }
+        
+        /* Main Content */
+        main { flex: 1; padding: 2rem; overflow-y: auto; }
+        .header-info { margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1rem; display: flex; justify-content: space-between; align-items: center; }
+        .run-id { font-size: 0.85rem; color: #64748b; }
+        
+        /* Grid */
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem; }
+        .card { background: white; border: 1px solid var(--border); border-radius: 0.75rem; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05); transition: transform 0.2s; display: flex; flex-direction: column; }
+        .card:hover { transform: translateY(-2px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .card-img-box { height: 200px; overflow: hidden; background: #f1f5f9; display: flex; align-items: center; justify-content: center; border-bottom: 1px solid var(--border); cursor: pointer; position: relative; }
+        .card-img-box img { max-width: 100%; max-height: 100%; object-fit: contain; }
+        .card-body { padding: 1rem; flex: 1; display: flex; flex-direction: column; justify-content: space-between; }
+        .card-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.5rem; }
+        .card-actions { margin-top: 0.5rem; display: flex; gap: 0.5rem; }
+        .btn-sm { font-size: 0.8rem; text-decoration: none; padding: 0.3rem 0.6rem; border: 1px solid var(--border); border-radius: 0.25rem; color: var(--text); background: #f8fafc; }
+        .btn-sm:hover { background: #e2e8f0; }
 
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:100}
-.modal.show{display:flex}
-.modal img{max-width:92vw;max-height:92vh;border-radius:10px;background:#fff}
-.modal .nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:none;background:rgba(0,0,0,.5);color:#fff;font-size:20px;cursor:pointer}
-.modal .prev{left:22px}.modal .next{right:22px}
-.modal .close{position:absolute;top:18px;right:20px;width:36px;height:36px;border-radius:50%;border:none;background:rgba(0,0,0,.5);color:#fff;font-size:18px;cursor:pointer}
-mark{background:#ffe58f}
-</style>
+        /* Types */
+        .iframe-container { width: 100%; height: 100%; }
+        iframe { width: 100%; height: 100%; border: none; pointer-events: none; } /* pointer-events none in grid to allow click */
+        
+        /* Modal */
+        .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; padding: 2rem; }
+        .modal.active { display: flex; }
+        .modal-content { max-width: 95vw; max-height: 95vh; object-fit: contain; border-radius: 4px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); }
+        .close-modal { position: absolute; top: 1rem; right: 1rem; color: white; font-size: 2rem; cursor: pointer; background: none; border: none; }
+        
+        /* Empty State */
+        .empty { text-align: center; color: #64748b; margin-top: 3rem; grid-column: 1 / -1; }
+    </style>
 </head>
 <body>
-<header>
-  <h1>Portfolio - Viewer (HTML)</h1>
-  <div class="search"><input id="q" placeholder="Buscar título/archivo..."></div>
-  <button id="theme" class="btn">Modo oscuro</button>
-  <span class="gen">Generado: __GEN_TIME__ &nbsp;|&nbsp; Run: __RUN_ID__</span>
-</header>
-<div class="container">
-  <aside id="cats"></aside>
-  <div id="grid" class="grid"></div>
-</div>
-<footer>Atajos: ESC cierra modal · ←/→ navegan · doble click zoom</footer>
 
-<div id="modal" class="modal" role="dialog">
-  <button class="nav prev">&#10094;</button>
-  <img id="modalImg" alt="">
-  <button class="nav next">&#10095;</button>
-  <button class="close">&#10005;</button>
+<aside>
+    <h1>📊 Portfolio Maker</h1>
+    <div id="nav-container">
+        </div>
+</aside>
+
+<main>
+    <div class="header-info">
+        <h2 id="current-cat-title">Todas</h2>
+        <span class="run-id">Generado: __RUN_ID__</span>
+    </div>
+    <div id="grid" class="grid">
+        </div>
+</main>
+
+<div class="modal" id="modal">
+    <button class="close-modal" onclick="closeModal()">&times;</button>
+    <img id="modal-img" class="modal-content" src="" alt="">
 </div>
 
 <script>
-const ITEMS = %%ITEMS%%;
-const CAT_COUNTS = %%CAT_COUNTS%%;
-let currentCat = 'All', query = '', currentImg = -1;
-const grid = document.getElementById('grid');
-const cats = document.getElementById('cats');
+    // Data injected from Python
+    const ITEMS = __ITEMS_JSON__;
+    
+    // State
+    let currentCat = 'Todas';
 
-function pill(txt,cat,active){ const b=document.createElement('button'); b.className='cat'+(active?' active':''); b.dataset.cat=cat; b.textContent=txt; b.onclick=()=>{currentCat=cat; render();}; return b; }
-
-function buildCats(){
-  cats.innerHTML='';
-  cats.appendChild(pill(`All (${ITEMS.length})`,'All', true));
-  for(const [cat,count] of Object.entries(CAT_COUNTS)) cats.appendChild(pill(`${cat} (${count})`,cat,false));
-}
-
-function highlight(s){ if(!query) return s; const q=query.replace(/[.*+?^${}()|[\\]\\]/g,'\\$&'); return s.replace(new RegExp(q,'ig'), m=>`<mark>${m}</mark>`); }
-
-const imageItems = [];
-function openModal(i){ currentImg = i; const it=imageItems[i]; if(!it) return; modalImg.src = it.path; modal.classList.add('show'); }
-function nav(dir){ if(imageItems.length===0) return; currentImg = (currentImg + dir + imageItems.length) % imageItems.length; modalImg.src = imageItems[currentImg].path; }
-function closeModal(){ modal.classList.remove('show'); modalImg.src=''; }
-
-function render(){
-  // activar categoría en menú
-  Array.from(document.querySelectorAll('.cat')).forEach(c=>c.classList.toggle('active', c.dataset.cat===currentCat));
-  // filtrar
-  const q = query.toLowerCase();
-  const filtered = ITEMS.filter(it => (currentCat==='All' || it.category===currentCat) && (!q || it.title.toLowerCase().includes(q) || it.file.toLowerCase().includes(q)));
-  grid.innerHTML='';
-  imageItems.length = 0;
-
-  if(filtered.length===0){
-    const d=document.createElement('div'); d.className='card'; d.innerHTML="<div class='title'>Sin resultados</div>";
-    grid.appendChild(d); return;
-  }
-
-  filtered.forEach((it)=>{
-    const card=document.createElement('div'); card.className='card'; card.style.position='relative';
-    if(it.is_html){
-      card.innerHTML = `
-        <div class="title">${it.title}</div>
-        <iframe class="iframe" src="${it.path}" loading="lazy"></iframe>
-        <div class="file">${it.file}</div>`;
-    }else if(it.is_csv){
-      card.innerHTML = `
-        <div class="title">${highlight(it.title)}</div>
-        <div class="file">${it.file}</div>
-        <div style="margin-top:6px"><a class="btn" href="${it.path}" download>Descargar CSV</a></div>`;
-    }else{
-      const idx = imageItems.push(it)-1;
-      card.innerHTML = `
-        <div class="toolbar">
-          <button class="tool" onclick="openModal(${idx})" title="Ver">&#128065;</button>
-          <a class="tool" href="${it.path}" target="_blank" title="Abrir">&#x1f5d7;</a>
-          <a class="tool" href="${it.path}" download title="Descargar">&#8681;</a>
-        </div>
-        <img class="img" src="${it.path}" alt="${it.title}">
-        <div class="title">${highlight(it.title)}</div>
-        <div class="file">${it.file}</div>`;
+    function init() {
+        renderNav();
+        renderGrid();
     }
-    grid.appendChild(card);
-  });
-}
 
-document.getElementById('q').addEventListener('input', e => { query = e.target.value.trim(); render(); });
-const themeBtn = document.getElementById('theme');
-themeBtn.onclick = ()=>{ const dark=document.body.classList.toggle('dark'); themeBtn.textContent = dark ? 'Modo claro' : 'Modo oscuro'; localStorage.setItem('theme', dark?'dark':'light'); };
-if(localStorage.getItem('theme')==='dark'){ document.body.classList.add('dark'); themeBtn.textContent='Modo claro'; }
+    function renderNav() {
+        const nav = document.getElementById('nav-container');
+        const cats = {};
+        ITEMS.forEach(i => cats[i.category] = (cats[i.category] || 0) + 1);
+        
+        let html = `<button class="nav-btn ${currentCat === 'Todas' ? 'active' : ''}" onclick="setCat('Todas')">
+                        Todas <span class="badge">${ITEMS.length}</span>
+                    </button>`;
+                    
+        // Sort categories to put specific ones first if desired, or alphabetical
+        Object.keys(cats).sort().forEach(cat => {
+            html += `<button class="nav-btn ${currentCat === cat ? 'active' : ''}" onclick="setCat('${cat}')">
+                        ${cat} <span class="badge">${cats[cat]}</span>
+                     </button>`;
+        });
+        nav.innerHTML = html;
+    }
 
-const modal = document.getElementById('modal'); const modalImg = document.getElementById('modalImg');
-document.querySelector('.close').onclick = closeModal;
-document.querySelector('.prev').onclick = ()=>nav(-1);
-document.querySelector('.next').onclick = ()=>nav(+1);
-document.addEventListener('keydown', e=>{ if(!modal.classList.contains('show')) return; if(e.key==='Escape') closeModal(); if(e.key==='ArrowLeft') nav(-1); if(e.key==='ArrowRight') nav(+1); });
-modalImg.ondblclick = ()=>{ modalImg.style.transform = modalImg.style.transform ? '' : 'scale(1.6)'; modalImg.style.transition='transform .15s'; };
+    function setCat(cat) {
+        currentCat = cat;
+        document.getElementById('current-cat-title').textContent = cat;
+        renderNav();
+        renderGrid();
+    }
 
-if(Object.keys(CAT_COUNTS).length===0){
-  ITEMS.forEach(it => { CAT_COUNTS[it.category] = (CAT_COUNTS[it.category]||0)+1; });
-}
-buildCats(); render();
+    function renderGrid() {
+        const grid = document.getElementById('grid');
+        const filtered = currentCat === 'Todas' ? ITEMS : ITEMS.filter(i => i.category === currentCat);
+        
+        if (filtered.length === 0) {
+            grid.innerHTML = '<div class="empty">No hay elementos en esta categoría.</div>';
+            return;
+        }
+
+        grid.innerHTML = filtered.map(item => {
+            let content = '';
+            if (item.type === 'img') {
+                content = `<div class="card-img-box" onclick="openModal('${item.path}')">
+                             <img src="${item.path}" alt="${item.title}" loading="lazy">
+                           </div>`;
+            } else if (item.type === 'html') {
+                content = `<div class="card-img-box">
+                             <div class="iframe-container"><iframe src="${item.path}"></iframe></div>
+                           </div>`;
+            } else {
+                content = `<div class="card-img-box" style="font-size:3rem">📄</div>`;
+            }
+
+            return `
+                <div class="card">
+                    ${content}
+                    <div class="card-body">
+                        <div class="card-title">${item.title}</div>
+                        <div class="card-actions">
+                            <a href="${item.path}" target="_blank" class="btn-sm">Abrir</a>
+                            <a href="${item.path}" download class="btn-sm">Descargar</a>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    // Modal logic
+    const modal = document.getElementById('modal');
+    const modalImg = document.getElementById('modal-img');
+
+    window.openModal = function(src) {
+        modalImg.src = src;
+        modal.classList.add('active');
+    }
+
+    window.closeModal = function() {
+        modal.classList.remove('active');
+        setTimeout(() => modalImg.src = '', 200);
+    }
+
+    // Close on click outside
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeModal();
+    });
+
+    // Close on Escape
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeModal();
+    });
+
+    // Start
+    init();
 </script>
 </body>
 </html>
 """
+    # Inyección segura de JSON
+    json_data = json.dumps(page_items, ensure_ascii=False)
+    html_content = html_template.replace('__ITEMS_JSON__', json_data)
+    html_content = html_content.replace('__RUN_ID__', run_id)
 
-    html = html.replace('%%ITEMS%%', json.dumps(page_items, ensure_ascii=False))
-    html = html.replace('%%CAT_COUNTS%%', json.dumps(cat_counts))
-    html = html.replace('__RUN_ID__', run_id)
-    html = html.replace('__GEN_TIME__', gen_time)
-    with open(out_html_path, 'w', encoding='utf-8') as fh:
-        fh.write(html)
-
-    # opcional: volcar items para diagnóstico
     try:
-        with open(os.path.join(out_dir, 'viewer_items.json'), 'w', encoding='utf-8') as fh:
-            json.dump({"items": page_items, "cat_counts": cat_counts}, fh, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-    print(f"[viewer] items: {len(page_items)}")
-    print(f"[saved] HTML viewer: {out_html_path}")
-    return out_html_path
-
+        with open(out_html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        print(f"[viewer] Generado correctamente en: {out_html_path}")
+        return out_html_path
+    except Exception as e:
+        print(f"[error] No se pudo guardar el HTML: {e}")
+        return None
 
 
 # ---------- MAIN (pipeline) ----------
@@ -3004,62 +2999,71 @@ def main():
 
     # HTML viewer
     # HTML viewer (sin duplicar)
-    def add(cat, path):
-        if path and os.path.exists(path):
-            image_index.setdefault(cat, []).append((os.path.basename(path), path))
-
+    # ----------------------------------------
+    # HTML viewer (Organizado por Categorías)
+    # ----------------------------------------
     image_index = {}
 
-    add('Backtest', graph_path)
+    def add(cat, path, title=None):
+        if path and os.path.exists(path):
+            # Si no se da título, usar el nombre del archivo
+            t = title if title else os.path.basename(path)
+            image_index.setdefault(cat, []).append((t, path))
 
-    add('Weights', os.path.join(OUT_DIR, 'weights_compact.png'))
-    add('Weights', os.path.join(OUT_DIR, 'weights_per_scenario_full.png'))
-
-    add('Forecast', os.path.join(OUT_DIR, 'forecast_by_scenario.png'))
-    add('Forecast', os.path.join(OUT_DIR, 'assets_forecast_table.png'))
-
-    # Investments (solo aquí; NO repetir en Scenario:*)
-    for name in scenarios.keys():
-        add('Investments', os.path.join(OUT_DIR, f"investments_{name}.png"))
-    # Consolidado si existe
-    add('Investments', os.path.join(OUT_DIR, "investments_all_scenarios.png"))
-
-    add('Correlation', corr_path)
-
-    # Alerts / Trades
-    if alerts_path: add('Alerts', alerts_path)
-    if alerts_plot_path: add('Alerts', alerts_plot_path)
-    if actions_path: add('Trades', actions_path)
-    if impact_path: add('Trades', impact_path)
-
-    # VaR / CVaR
-    add('Var', os.path.join(OUT_DIR, 'var_by_horizon.png'))
-    add('Var', os.path.join(OUT_DIR, 'cvar_by_horizon.png'))
-
-    # Stress
-    for p in stress_paths:
-        add('Stress', p)
-
-    # Por escenario (sin la imagen investments_*.png para no duplicar)
-    for name in scenarios.keys():
-        add(f"Scenario:{name}", os.path.join(OUT_DIR, f"drawdown_{name}.png"))
-        add(f"Scenario:{name}", os.path.join(OUT_DIR, f"rolling_sharpe_{name}.png"))
-        add(f"Scenario:{name}", os.path.join(OUT_DIR, f"rolling_vol_{name}.png"))
-
-    # Interactivo (se detecta también dentro de generate_html_viewer, pero lo añadimos por si acaso)
-    interactive_path = os.path.join(OUT_DIR, 'backtest_interactive.html')
+    # 1. Comparativa Global (Backtest)
+    add('Comparativa', graph_path, 'Backtest Comparativo')
     if os.path.exists(interactive_path):
-        add('Interactivo', interactive_path)
+        add('Comparativa', interactive_path, 'Backtest Interactivo (Plotly)')
 
+    # 2. Pesos y Asignación (Weights & Allocations)
+    add('Pesos y Asignación', os.path.join(OUT_DIR, 'weights_compact.png'), 'Tabla Compacta')
+    add('Pesos y Asignación', os.path.join(OUT_DIR, 'weights_per_scenario_full.png'), 'Tabla Completa')
+    # Añadimos aquí también las inversiones sugeridas por escenario
+    for name in scenarios.keys():
+        add('Pesos y Asignación', os.path.join(OUT_DIR, f"investments_{name}.png"), f"Inversión: {name}")
+    add('Pesos y Asignación', os.path.join(OUT_DIR, "investments_all_scenarios.png"), "Inversiones Consolidadas")
+
+    # 3. Proyecciones (Forecasts)
+    add('Proyecciones', os.path.join(OUT_DIR, 'forecast_by_scenario.png'), 'Pronóstico por Escenario')
+    add('Proyecciones', os.path.join(OUT_DIR, 'assets_forecast_table.png'), 'Pronóstico por Activo')
+    add('Proyecciones', corr_path, 'Mapa de Calor (Correlaciones)')
+
+    # 4. Riesgo (VaR / CVaR / Stress)
+    add('Riesgo', os.path.join(OUT_DIR, 'var_by_horizon.png'), 'VaR (Value at Risk)')
+    add('Riesgo', os.path.join(OUT_DIR, 'cvar_by_horizon.png'), 'CVaR (Expected Shortfall)')
+    add('Riesgo', perc_df_path, 'Percentiles Simulados')
+    for p in stress_paths:
+        add('Riesgo (Stress Test)', p)
+    add('Riesgo', dd_summary_path, 'Resumen Drawdowns')
+
+    # 5. Rebalanceo (Alertas y Trades)
+    if alerts_path: add('Rebalanceo', alerts_path, 'Alertas (Tabla)')
+    if alerts_plot_path: add('Rebalanceo', alerts_plot_path, 'Alertas (Gráfico)')
+    if actions_path: add('Rebalanceo', actions_path, 'Sugerencias (Trades)')
+    if impact_path: add('Rebalanceo', impact_path, 'Impacto Económico')
+
+    # 6. Detalles por Portafolio (Categoría individual para cada uno)
+    # Aquí es donde "picas a la categoría que quieras" para ver solo ese portafolio
+    for name in scenarios.keys():
+        # Agrupamos métricas específicas de cada portafolio bajo su propio nombre
+        add(name, os.path.join(OUT_DIR, f"drawdown_{name}.png"), "Drawdown Histórico")
+        add(name, os.path.join(OUT_DIR, f"rolling_sharpe_{name}.png"), "Rolling Sharpe")
+        add(name, os.path.join(OUT_DIR, f"rolling_vol_{name}.png"), "Rolling Volatility")
+        # Si quisieras ver los pesos de este portafolio aquí también, descomenta la siguiente línea:
+        # add(name, os.path.join(OUT_DIR, f"investments_{name}.png"), "Detalle Inversión")
+
+    # Generar el HTML final
     html_path = os.path.join(OUT_DIR, 'viewer.html')
-    generate_html_viewer(image_index, html_path)
+    generated_path = generate_html_viewer(image_index, html_path, out_dir=OUT_DIR, run_id=run_id)
 
-    try:
-        url = 'file://' + os.path.abspath(html_path)
-        webbrowser.open(url)
-        print(f"Abrí el viewer HTML en el navegador (si tu entorno lo permite): {url}")
-    except Exception as e:
-        print(f"No se pudo abrir el navegador automáticamente: {e}. Abre manualmente: {os.path.abspath(html_path)}")
+    # Intentar abrir
+    if generated_path:
+        try:
+            url = 'file://' + os.path.abspath(generated_path)
+            webbrowser.open(url)
+            print(f"[viewer] Abriendo: {url}")
+        except Exception:
+            print(f"[viewer] Abre manualmente: {generated_path}")
 
     plt.close('all')
     if TK_AVAILABLE:
